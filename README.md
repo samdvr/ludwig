@@ -109,21 +109,6 @@ file is load-bearing — don't hand-edit it.
    `ludwig verify --ingest-judgments <file>`. Verdicts are keyed by the spec
    hash, so changing the spec invalidates old verdicts automatically.
 
-## The Wittgenstein angle, concretely
-
-- **Meaning is use** — the Examples section is verification, not illustration.
-  A behavior bullet without examples that exercise it is treated as vague
-  intent, and the parser flags it.
-- **Language-games** — each `specs/<dir>/` is a local context. `_game.md`
-  declares its glossary. The word "user" in `specs/auth/` need not mean the
-  same thing as in `specs/billing/`. The generation brief always includes the
-  resolved glossary for the spec's enclosing game.
-- **Family resemblance** — beyond the fixed section list, Ludwig refuses to
-  grow a domain ontology. Specs for an HTTP endpoint and a CLI command
-  resemble each other; they don't share a schema.
-- **Whereof one cannot speak** — `Open questions` in a spec blocks
-  `status: active`. Unresolved meaning cannot drive generation.
-
 ## Installation
 
 ```bash
