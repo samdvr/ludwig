@@ -31,11 +31,22 @@ impl Adapter for RustAdapter {
         fs::create_dir_all(self.tests_dir())
             .map_err(|e| VerifyError::new(format!("mkdir tests: {e}")))?;
         let target = self.test_file_for(doc.id());
-        // The test file is USER-OWNED after first scaffold. Only write if absent.
-        // Drift detection (via the trailing `ludwig-spec:` comment) handles updates.
         if !target.is_file() {
             fs::write(&target, render_scaffold(doc))
                 .map_err(|e| VerifyError::new(format!("write {}: {e}", target.display())))?;
+        } else {
+            // Body is user-owned, but the trailing `ludwig-spec:` stamp must track
+            // the current spec hash so drift detection stays meaningful. Update in
+            // place when present; if the user has stripped the stamp entirely we
+            // leave the file alone — the structural check will surface that as a
+            // missing-stamp failure.
+            let content = fs::read_to_string(&target)
+                .map_err(|e| VerifyError::new(format!("read {}: {e}", target.display())))?;
+            let updated = crate::drift::update_stamp_in_place(&content, doc);
+            if updated != content {
+                fs::write(&target, &updated)
+                    .map_err(|e| VerifyError::new(format!("write {}: {e}", target.display())))?;
+            }
         }
         // Return both paths; for the Rust adapter the "spec file" and "steps file" are
         // the same single file. Keep the API uniform for future adapters.
@@ -108,7 +119,7 @@ pub(crate) fn file_slug(id: &str) -> String {
     id.replace(['-', '/'], "_")
 }
 
-fn example_test_name(name: &str) -> String {
+pub(crate) fn example_test_name(name: &str) -> String {
     let mut out = String::from("test_example_");
     for c in name.to_lowercase().chars() {
         if c.is_ascii_alphanumeric() {
@@ -130,7 +141,7 @@ fn example_test_name(name: &str) -> String {
     }
 }
 
-fn invariant_test_name(idx: usize) -> String {
+pub(crate) fn invariant_test_name(idx: usize) -> String {
     format!("test_deterministic_invariant_{}", idx + 1)
 }
 

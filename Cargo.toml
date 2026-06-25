@@ -23,8 +23,9 @@ regex = "1"
 walkdir = "2"
 thiserror = "2"
 anyhow = "1"
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting"] }
 indexmap = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
+tempfile = "3"
 

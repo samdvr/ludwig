@@ -11,6 +11,7 @@ pub mod prompts;
 pub mod scaffold;
 pub mod skill;
 pub mod spec;
+pub mod util;
 pub mod verify;
 
 pub use error::{Error, ParseError, ProjectError, VerifyError};

@@ -119,7 +119,7 @@ fn unknown_method_returns_error() {
     let (_dir, project) = make_project_with_minimal_spec();
     let server = ludwig::mcp::Server::new(Some(project), None);
     let resp = call(&server, "foo/bar", json!({}));
-    assert_eq!(resp.pointer("/error/code"), Some(&Value::from(-32602)));
+    assert_eq!(resp.pointer("/error/code"), Some(&Value::from(-32601)));
 }
 
 #[test]
@@ -249,4 +249,73 @@ fn game_create_writes_manifest() {
     assert!(manifest.is_file());
     let body = std::fs::read_to_string(&manifest).unwrap();
     assert!(body.contains("Invoice") && body.contains("monthly statement"));
+}
+
+#[test]
+fn spec_diff_returns_drift_report() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.diff",
+            "arguments": { "id": "hello-greeter" }
+        }),
+    );
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed.pointer("/id"), Some(&Value::String("hello-greeter".to_string())));
+    // No implements: declared — files array is empty.
+    assert!(parsed.pointer("/files").and_then(Value::as_array).unwrap().is_empty());
+}
+
+#[test]
+fn spec_move_relocates_between_games() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project.clone()), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.move",
+            "arguments": { "slug": "hello-greeter", "to_game": "auth" }
+        }),
+    );
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed.get("ok"), Some(&Value::Bool(true)));
+    assert!(project.specs_dir().join("auth").join("hello-greeter.spec.md").is_file());
+    assert!(!project.specs_dir().join("hello-greeter.spec.md").is_file());
+}
+
+#[test]
+fn spec_ingest_judgments_persists_verdicts() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project.clone()), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.ingest_judgments",
+            "arguments": {
+                "verdicts": [{
+                    "invariant_key": "hello-greeter::judgment::1",
+                    "verdict": "pass",
+                    "rationale": "Looks good",
+                    "spec_id": "hello-greeter",
+                    "spec_hash": "deadbeef"
+                }]
+            }
+        }),
+    );
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed.get("ok"), Some(&Value::Bool(true)));
+    assert_eq!(parsed.get("ingested"), Some(&Value::from(1)));
+
+    let state = project.load_state().unwrap();
+    let v = state.judgments.get("hello-greeter::judgment::1").expect("verdict persisted");
+    assert_eq!(v.verdict, "pass");
+    assert_eq!(v.spec_hash.as_deref(), Some("deadbeef"));
 }

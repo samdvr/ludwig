@@ -4,16 +4,35 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::drift;
 use crate::error::ProjectError;
-use crate::game::Game;
 use crate::parser;
 use crate::plan;
 use crate::project::Project;
 use crate::prompts::{self, ExistingSpec, PeerSpec};
 use crate::scaffold::{self, WriteSpecError};
-use crate::verify::{self, RunOptions};
+use crate::verify::{self, IngestedVerdict, RunOptions};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Canonical list of MCP tool names this server exposes. Both
+/// [`tool_descriptors`] (advertised over `tools/list`) and [`Server::call_tool`]
+/// (the dispatcher) must agree with this list — the `tools_descriptors_match_dispatch`
+/// test enforces it. Adding a new tool means: append a name here, add a
+/// descriptor in `tool_descriptors`, and add a match arm in `call_tool`.
+pub const TOOL_NAMES: &[&str] = &[
+    "spec.list",
+    "spec.read",
+    "spec.plan",
+    "spec.verify",
+    "spec.diff",
+    "spec.propose",
+    "spec.write",
+    "spec.move",
+    "spec.ingest_judgments",
+    "project.decompose",
+    "game.create",
+];
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -55,7 +74,8 @@ impl Server {
                 continue;
             }
             if let Some(response) = self.handle_line(trimmed) {
-                writeln!(out, "{}", serde_json::to_string(&response).unwrap_or_default())?;
+                let payload = serialize_response(&response);
+                writeln!(out, "{payload}")?;
                 out.flush()?;
             }
         }
@@ -100,7 +120,7 @@ impl Server {
             "resources/list" => Ok(json!({ "resources": self.resource_descriptors() })),
             "resources/read" => self.read_resource(params),
             other => Err(ErrorObject {
-                code: -32602,
+                code: -32601,
                 message: format!("method not found: {other}"),
             }),
         }
@@ -216,8 +236,11 @@ impl Server {
             "spec.read" => self.tool_spec_read(args)?,
             "spec.plan" => self.tool_spec_plan(args)?,
             "spec.verify" => self.tool_spec_verify(args)?,
+            "spec.diff" => self.tool_spec_diff(args)?,
             "spec.propose" => Value::String(self.tool_spec_propose(args)?),
             "spec.write" => self.tool_spec_write(args)?,
+            "spec.move" => self.tool_spec_move(args)?,
+            "spec.ingest_judgments" => self.tool_spec_ingest_judgments(args)?,
             "project.decompose" => Value::String(self.tool_project_decompose(args)?),
             "game.create" => self.tool_game_create(args)?,
             other => {
@@ -265,12 +288,36 @@ impl Server {
     fn tool_spec_read(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
-        let _ = project.find_spec_path(id).ok_or_else(|| ErrorObject {
+        let path = project.find_spec_path(id).ok_or_else(|| ErrorObject {
             code: -32602,
             message: "no such spec".to_string(),
         })?;
-        let brief = plan::brief_for(&project, id).map_err(project_to_rpc)?;
-        Ok(serde_json::to_value(&brief.spec).unwrap_or_default())
+        let doc = parser::parse_file(&path).map_err(|e| ErrorObject {
+            code: -32603,
+            message: e.message,
+        })?;
+        let rel = path
+            .strip_prefix(&project.root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        // Mirror the shape of `plan::SpecBrief` so MCP callers don't have to
+        // special-case the two tools. Avoids the cost of full dependency
+        // resolution and file fingerprints that `plan::brief_for` performs.
+        Ok(json!({
+            "id": doc.id(),
+            "title": doc.frontmatter.title,
+            "version": doc.version(),
+            "status": doc.frontmatter.status.as_str(),
+            "canonical_hash": doc.canonical_hash(),
+            "path": rel,
+            "intent": doc.intent,
+            "behaviors": doc.behaviors,
+            "examples": doc.examples,
+            "invariants": doc.invariants,
+            "non_goals": doc.non_goals,
+            "implementation_notes": doc.implementation_notes,
+        }))
     }
 
     fn tool_spec_plan(&self, args: &Value) -> Result<Value, ErrorObject> {
@@ -296,17 +343,68 @@ impl Server {
         Ok(serde_json::to_value(&report).unwrap_or_default())
     }
 
+    fn tool_spec_diff(&self, args: &Value) -> Result<Value, ErrorObject> {
+        let project = self.project()?;
+        let id = require_string(args, "id")?;
+        let report = drift::report(&project, id).map_err(project_to_rpc)?;
+        Ok(serde_json::to_value(&report).unwrap_or_default())
+    }
+
+    fn tool_spec_ingest_judgments(&self, args: &Value) -> Result<Value, ErrorObject> {
+        let project = self.project()?;
+        let verdicts_value = args.get("verdicts").ok_or_else(|| ErrorObject {
+            code: -32602,
+            message: "missing argument: verdicts (array)".to_string(),
+        })?;
+        // Re-deserialize through the IngestedVerdict type so the same shape is
+        // accepted as the file path overload — keeps a single source of truth
+        // for what a "verdict" looks like.
+        let verdicts: Vec<IngestedVerdict> = serde_json::from_value(verdicts_value.clone())
+            .map_err(|e| ErrorObject {
+                code: -32602,
+                message: format!("verdicts must be an array of {{invariant_key, verdict, ...}}: {e}"),
+            })?;
+        let count = verdicts.len();
+        verify::Verify::new(&project)
+            .apply_judgments(verdicts)
+            .map_err(|e| ErrorObject {
+                code: -32603,
+                message: format!("ingest failed: {e}"),
+            })?;
+        Ok(json!({ "ok": true, "ingested": count }))
+    }
+
+    fn tool_spec_move(&self, args: &Value) -> Result<Value, ErrorObject> {
+        let project = self.project()?;
+        let slug = require_string(args, "slug")?;
+        // `to_game` is intentionally optional — passing `null` (or omitting)
+        // means "move to the specs root".
+        let to_game = args.get("to_game").and_then(|v| v.as_str());
+        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+        match scaffold::move_spec(&project, slug, to_game, force) {
+            Ok(target) => {
+                let rel = target
+                    .strip_prefix(&project.root)
+                    .unwrap_or(&target)
+                    .to_string_lossy()
+                    .into_owned();
+                Ok(json!({ "ok": true, "path": rel }))
+            }
+            Err(e) => Ok(json!({ "ok": false, "error": e.0 })),
+        }
+    }
+
     fn tool_spec_propose(&self, args: &Value) -> Result<String, ErrorObject> {
         let project = self.project()?;
         let slug = require_string(args, "slug")?;
         let description = require_string(args, "description")?;
         let game_name = args.get("game").and_then(|v| v.as_str());
-        let peers_owned = peer_specs_for(&project, game_name);
+        let peers_owned = project.peer_specs_for(game_name);
         let peers: Vec<PeerSpec<'_>> = peers_owned
             .iter()
             .map(|(id, title)| PeerSpec { id, title })
             .collect();
-        let glossary = glossary_for(&project, game_name);
+        let glossary = project.glossary_for(game_name);
         Ok(prompts::spec_from_description(
             slug,
             description,
@@ -352,19 +450,7 @@ impl Server {
     fn tool_project_decompose(&self, args: &Value) -> Result<String, ErrorObject> {
         let project = self.project()?;
         let description = require_string(args, "description")?;
-        let existing_owned: Vec<(String, String, String)> = project
-            .spec_paths()
-            .iter()
-            .filter_map(|p| {
-                parser::parse_file(p).ok().map(|d| {
-                    (
-                        d.id().to_string(),
-                        d.frontmatter.title.clone(),
-                        d.frontmatter.status.as_str().to_string(),
-                    )
-                })
-            })
-            .collect();
+        let existing_owned = project.list_existing_specs();
         let existing: Vec<ExistingSpec<'_>> = existing_owned
             .iter()
             .map(|(id, title, status)| ExistingSpec {
@@ -373,16 +459,7 @@ impl Server {
                 status,
             })
             .collect();
-        let mut games: Vec<String> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(project.specs_dir()) {
-            for e in rd.flatten() {
-                if e.path().is_dir()
-                    && let Some(n) = e.file_name().to_str()
-                {
-                    games.push(n.to_string());
-                }
-            }
-        }
+        let games = project.list_existing_games();
         Ok(prompts::project_decomposition(description, &existing, &games))
     }
 
@@ -459,55 +536,39 @@ fn project_to_rpc(e: ProjectError) -> ErrorObject {
     ErrorObject { code: -32603, message: e.0 }
 }
 
+/// Serialize a response to a JSON-RPC line. The response types are constructed
+/// from `serde_json::Value` internally, so serialization should be infallible —
+/// but if it ever isn't, we MUST emit a well-formed error line rather than an
+/// empty string. An empty line on stdout would corrupt the JSON-RPC framing the
+/// client uses to delimit messages.
+fn serialize_response(response: &ResponseValue) -> String {
+    match serde_json::to_string(response) {
+        Ok(s) => s,
+        Err(e) => {
+            let fallback = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": response.id.clone(),
+                "error": {
+                    "code": -32603,
+                    "message": format!("internal serialization error: {e}"),
+                },
+            });
+            // serde_json::to_string on a plain Value is itself effectively
+            // infallible; fall back to a hand-built byte string only if it
+            // somehow isn't.
+            serde_json::to_string(&fallback).unwrap_or_else(|_| {
+                r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal serialization error"}}"#
+                    .to_string()
+            })
+        }
+    }
+}
+
 fn require_string<'a>(args: &'a Value, key: &str) -> Result<&'a str, ErrorObject> {
     args.get(key).and_then(|v| v.as_str()).ok_or_else(|| ErrorObject {
         code: -32602,
         message: format!("missing argument: {key}"),
     })
-}
-
-fn peer_specs_for(project: &Project, game_name: Option<&str>) -> Vec<(String, String)> {
-    let dir = match game_name {
-        Some(g) => project.specs_dir().join(g),
-        None => project.specs_dir(),
-    };
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    let mut out: Vec<(String, String)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            if !p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.ends_with(".spec.md"))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if let Ok(doc) = parser::parse_file(&p) {
-                out.push((doc.id().to_string(), doc.frontmatter.title.clone()));
-            }
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-fn glossary_for(project: &Project, game_name: Option<&str>) -> Vec<(String, String)> {
-    let Some(g) = game_name else { return Vec::new() };
-    let manifest = project.specs_dir().join(g).join(Game::MANIFEST_FILE);
-    if !manifest.is_file() {
-        return Vec::new();
-    }
-    match Game::load(&manifest, project) {
-        Ok(game) => game.glossary.into_iter().collect(),
-        Err(_) => Vec::new(),
-    }
 }
 
 fn tool_descriptors() -> Vec<Value> {
@@ -551,6 +612,16 @@ fn tool_descriptors() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "spec.diff",
+            "description": "Return drift between a spec and its implementing files (stale stamps, missing files, body changes).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "spec.propose",
             "description": "Return a prompt for drafting a new spec from a description.",
             "inputSchema": {
@@ -580,6 +651,46 @@ fn tool_descriptors() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "spec.move",
+            "description": "Move an existing spec into a different game (or to the specs root if to_game is null).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "to_game": { "type": ["string", "null"] },
+                    "force": { "type": "boolean" }
+                },
+                "required": ["slug"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "spec.ingest_judgments",
+            "description": "Persist a batch of judgment verdicts inline (no file path). Use after evaluating prompts emitted by spec.verify with emit_judgment_prompts=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verdicts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "invariant_key": { "type": "string" },
+                                "verdict": { "type": "string", "enum": ["pass", "fail"] },
+                                "rationale": { "type": ["string", "null"] },
+                                "spec_id": { "type": ["string", "null"] },
+                                "spec_hash": { "type": ["string", "null"] }
+                            },
+                            "required": ["invariant_key", "verdict"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["verdicts"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "project.decompose",
             "description": "Return a prompt that decomposes a project description into specs.",
             "inputSchema": {
@@ -605,4 +716,47 @@ fn tool_descriptors() -> Vec<Value> {
             }
         }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Guard against the descriptor table and the dispatch match getting out of
+    /// sync. Both must cover exactly `TOOL_NAMES`. If you add a tool, update all
+    /// three places — this test will tell you if you missed one.
+    #[test]
+    fn tools_descriptors_match_dispatch() {
+        let canonical: BTreeSet<&str> = TOOL_NAMES.iter().copied().collect();
+
+        let descriptors = tool_descriptors();
+        let advertised: BTreeSet<String> = descriptors
+            .iter()
+            .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        let advertised_refs: BTreeSet<&str> = advertised.iter().map(String::as_str).collect();
+        assert_eq!(
+            advertised_refs, canonical,
+            "tool_descriptors() must advertise exactly TOOL_NAMES",
+        );
+
+        // Verify the dispatcher knows every canonical name. We build a fake
+        // request and confirm that `call_tool` does NOT return "unknown tool".
+        // A descriptor that's missing from the match arm would fail here.
+        for name in TOOL_NAMES {
+            // We don't have a real project, so this will most likely fail with
+            // some other error — but never with "unknown tool".
+            let probe = json!({ "name": name, "arguments": {} });
+            let server = Server::new(None, None);
+            let err = server.call_tool(&probe).err();
+            if let Some(e) = err {
+                assert!(
+                    !e.message.starts_with("unknown tool:"),
+                    "call_tool() rejected canonical name {name:?} as unknown — \
+                     add a match arm for it",
+                );
+            }
+        }
+    }
 }

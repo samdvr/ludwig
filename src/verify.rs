@@ -9,7 +9,6 @@ use crate::adapters::{self, Adapter, TestStatus};
 use crate::drift;
 use crate::error::VerifyError;
 use crate::parser;
-use crate::plan;
 use crate::project::Project;
 use crate::spec::Document;
 
@@ -105,16 +104,35 @@ impl<'a> Verify<'a> {
             .to_string_lossy()
             .into_owned();
 
+        let judgment_prompts = self.judgment_prompts_for(&doc, &spec_path_rel);
+
+        // Prompts-only mode: the caller just wants the judgment-prompt JSON and
+        // does not need a fresh cargo run, a persisted report, or state updates.
+        // Short-circuit to avoid the cost (cargo test on a cold target dir can
+        // take tens of seconds) and the side effects.
+        if opts.emit_judgment_prompts {
+            return Ok(Report {
+                id: doc.id().to_string(),
+                spec_version: doc.version(),
+                spec_hash: doc.canonical_hash(),
+                spec_path: spec_path_rel,
+                checks: Vec::new(),
+                summary: Summary::default(),
+                judgment_prompts,
+            });
+        }
+
         let mut checks: Vec<Check> = Vec::new();
         checks.extend(self.structural_checks(&doc));
 
         // Render + run the Rust test adapter.
         let adapter = adapters::for_project(self.project);
-        adapter.render(&doc)?;
+        let render_info = adapter.render(&doc)?;
+        checks.extend(test_file_stamp_check(&render_info.spec_file, &self.project.root, &doc));
         let run_result = adapter.run(&doc)?;
         checks.extend(deterministic_checks(&doc, &run_result));
+        checks.extend(missing_test_checks(&doc, &run_result));
 
-        let judgment_prompts = self.judgment_prompts_for(&doc, &spec_path_rel);
         checks.extend(self.judgment_check_stubs(&judgment_prompts)?);
 
         let summary = summarize(&checks);
@@ -131,7 +149,6 @@ impl<'a> Verify<'a> {
 
         self.persist_report(&report)?;
         self.record_state(&doc)?;
-        let _ = opts; // currently informational only; CLI handles --emit
         Ok(report)
     }
 
@@ -140,6 +157,13 @@ impl<'a> Verify<'a> {
             .map_err(|e| VerifyError::new(format!("read {}: {e}", json_path.display())))?;
         let verdicts: Vec<IngestedVerdict> = serde_json::from_slice(&bytes)
             .map_err(|e| VerifyError::new(format!("parse verdicts: {e}")))?;
+        self.apply_judgments(verdicts)
+    }
+
+    /// Persist a batch of judgment verdicts to `state.json`. Shared by the
+    /// file-based `ingest_judgments` and the MCP `spec.ingest_judgments` tool,
+    /// which receives the verdicts inline as a JSON array.
+    pub fn apply_judgments(&self, verdicts: Vec<IngestedVerdict>) -> Result<(), crate::Error> {
         let mut state = self.project.load_state()?;
         for v in verdicts {
             state.judgments.insert(
@@ -167,7 +191,7 @@ impl<'a> Verify<'a> {
         ));
 
         for pat in &doc.frontmatter.implements {
-            let matched = matched_files(self.project, pat);
+            let matched = crate::util::matched_files(self.project, pat, false);
             if matched.is_empty() {
                 out.push(Check::new(
                     "structural",
@@ -217,8 +241,8 @@ impl<'a> Verify<'a> {
                         "fail",
                         Some(format!(
                             "spec drifted since stamp ({} → {})",
-                            &stamp.hash.get(..7).unwrap_or(stamp.hash),
-                            &doc.canonical_hash()[..7]
+                            drift::short_hash(stamp.hash),
+                            drift::short_hash(&doc.canonical_hash()),
                         )),
                     )),
                     Some(_) => out.push(Check::new(
@@ -239,7 +263,7 @@ impl<'a> Verify<'a> {
             .frontmatter
             .implements
             .iter()
-            .flat_map(|g| matched_files(self.project, g))
+            .flat_map(|g| crate::util::matched_files(self.project, g, false))
             .map(|p| {
                 p.strip_prefix(&self.project.root)
                     .unwrap_or(&p)
@@ -325,7 +349,7 @@ impl<'a> Verify<'a> {
             .frontmatter
             .implements
             .iter()
-            .flat_map(|g| matched_files(self.project, g))
+            .flat_map(|g| crate::util::matched_files(self.project, g, false))
             .collect();
         drift::record(self.project, doc, &files)?;
         Ok(())
@@ -338,7 +362,7 @@ pub fn render_text(report: &Report) -> String {
         "{} v{} (hash={})\n",
         report.id,
         report.spec_version,
-        &report.spec_hash.get(..7).unwrap_or(&report.spec_hash)
+        drift::short_hash(&report.spec_hash),
     ));
     for c in &report.checks {
         let mark = match c.status.as_str() {
@@ -404,16 +428,131 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
             ),
         ));
     }
-    // Property invariants are accepted by the parser but deferred to v0.2.
+    // Property invariants are parsed but not yet machine-verified. For an active
+    // spec we must fail loudly — otherwise the verifier silently green-lights
+    // claims it never checked. For draft / deprecated specs the parser has
+    // already declined to enforce "verified", so a `skip` is honest.
+    let active = doc.frontmatter.is_active();
     for inv in doc.property_invariants() {
+        let (status, detail) = if active {
+            (
+                "fail",
+                "property invariants are not yet machine-verified (deferred to v0.2). \
+                 An `active` spec cannot rely on unverified invariants — move to draft, \
+                 rewrite the invariant as {deterministic}, or downgrade it to {judgment}.",
+            )
+        } else {
+            (
+                "skip",
+                "property-based generation deferred to v0.2; skipped on non-active spec",
+            )
+        };
         out.push(Check::new(
             "property",
             truncate(&inv.text, 60),
-            "skip",
-            Some("property-based generation deferred to v0.2".into()),
+            status,
+            Some(detail.into()),
         ));
     }
     out
+}
+
+/// Compare the test functions cargo actually ran against the set the spec
+/// requires. Anything missing from cargo's output is either a brand-new example
+/// that the user hasn't backed with a `#[test] fn` yet, or a test the user
+/// removed by hand. Either way the spec is unverified along that axis and the
+/// report should say so.
+fn missing_test_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec<Check> {
+    use std::collections::HashSet;
+    let actual: HashSet<&str> = run.tests.iter().map(|t| t.name.as_str()).collect();
+    let mut out: Vec<Check> = Vec::new();
+
+    for ex in &doc.examples {
+        let expected = crate::adapters::rust::example_test_name(&ex.name);
+        if !actual.contains(expected.as_str()) {
+            out.push(Check::new(
+                "deterministic",
+                format!("example:{} (missing)", ex.name),
+                "fail",
+                Some(format!(
+                    "no `fn {expected}` in tests/ludwig_<slug>.rs; add a #[test] for this example"
+                )),
+            ));
+        }
+    }
+    for (idx, inv) in doc.deterministic_invariants().enumerate() {
+        let expected = crate::adapters::rust::invariant_test_name(idx);
+        if !actual.contains(expected.as_str()) {
+            out.push(Check::new(
+                "deterministic",
+                format!("invariant:{} (missing)", truncate(&inv.text, 40)),
+                "fail",
+                Some(format!(
+                    "no `fn {expected}` in tests/ludwig_<slug>.rs; add a #[test] for this invariant"
+                )),
+            ));
+        }
+    }
+    out
+}
+
+/// Verify the test file's trailing `ludwig-spec:` stamp tracks the current spec
+/// hash. The adapter's `render` rewrites the stamp in place when one is present,
+/// so a mismatch here means the user deleted the stamp entirely.
+fn test_file_stamp_check(
+    test_file: &std::path::Path,
+    root: &std::path::Path,
+    doc: &Document,
+) -> Vec<Check> {
+    let rel = test_file
+        .strip_prefix(root)
+        .unwrap_or(test_file)
+        .to_string_lossy()
+        .into_owned();
+    let content = match fs::read_to_string(test_file) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Check::new(
+                "structural",
+                format!("stamp:{rel}"),
+                "fail",
+                Some(format!("read failed: {e}")),
+            )];
+        }
+    };
+    match drift::parse_trailing(&content) {
+        None => vec![Check::new(
+            "structural",
+            format!("stamp:{rel}"),
+            "fail",
+            Some(
+                "test file has no trailing `ludwig-spec:` stamp — restore it or delete the file and re-render"
+                    .into(),
+            ),
+        )],
+        Some(stamp) if stamp.id != doc.id() => vec![Check::new(
+            "structural",
+            format!("stamp:{rel}"),
+            "fail",
+            Some(format!("stamped for {}, expected {}", stamp.id, doc.id())),
+        )],
+        Some(stamp) if stamp.hash != doc.canonical_hash() => vec![Check::new(
+            "structural",
+            format!("stamp:{rel}"),
+            "fail",
+            Some(format!(
+                "test file stamp drifted ({} → {}); re-run `ludwig verify` to update",
+                drift::short_hash(stamp.hash),
+                drift::short_hash(&doc.canonical_hash()),
+            )),
+        )],
+        Some(_) => vec![Check::new(
+            "structural",
+            format!("stamp:{rel}"),
+            "pass",
+            Some("in sync".into()),
+        )],
+    }
 }
 
 fn summarize(checks: &[Check]) -> Summary {
@@ -444,15 +583,6 @@ Default to \"fail\" if you are uncertain.",
         doc.intent,
         inv.text,
     )
-}
-
-fn matched_files(project: &Project, pattern: &str) -> Vec<PathBuf> {
-    if plan::contains_glob(pattern) {
-        plan::glob_expand(&project.root, pattern)
-    } else {
-        let p = project.root.join(pattern);
-        if p.is_file() { vec![p] } else { Vec::new() }
-    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

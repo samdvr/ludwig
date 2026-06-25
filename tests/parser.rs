@@ -358,3 +358,44 @@ Then it works
         err.message
     );
 }
+
+#[test]
+fn open_questions_must_be_bulleted() {
+    // Open questions used to accept prose as a fallback; every other section
+    // requires bullets. Make policy uniform.
+    let spec = r#"---
+id: prose-oq
+title: Prose open questions
+status: draft
+version: 1
+---
+
+## Intent
+A spec whose Open questions section contains a paragraph rather than a
+bulleted list. The parser must refuse this so the formatting of every
+section follows the same rule.
+
+## Behavior
+- thing
+
+## Examples
+```example name="x"
+Given a thing
+When it runs
+Then it works
+```
+
+## Invariants
+- {deterministic} ok
+
+## Open questions
+This is prose, not a bullet, so the parser must reject it.
+"#;
+    let err = ludwig::parser::parse(spec).expect_err("should fail");
+    assert!(
+        err.message.contains("Open questions")
+            && err.message.to_lowercase().contains("bullet"),
+        "expected bullets-required error, got: {}",
+        err.message
+    );
+}

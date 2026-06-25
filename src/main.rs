@@ -32,7 +32,13 @@ enum Cmd {
     },
 
     /// Parse one or all specs and report structural errors.
-    Parse { path: Option<PathBuf> },
+    Parse {
+        path: Option<PathBuf>,
+        /// Suppress per-file `ok` output; only print errors and the summary.
+        /// Handy for pre-commit hooks that only need the exit code + diagnostics.
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+    },
 
     /// Regenerate `specs/_index.md`.
     Catalog,
@@ -49,6 +55,10 @@ enum Cmd {
         emit_judgment_prompts: bool,
         #[arg(long = "ingest-judgments")]
         ingest_judgments: Option<PathBuf>,
+        /// Emit reports as a JSON array on stdout instead of human-formatted text.
+        /// `latest.md` is still written under `.ludwig/reports/`.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
     /// Show drift between specs and code.
@@ -56,6 +66,9 @@ enum Cmd {
         id: Option<String>,
         #[arg(long, default_value_t = false)]
         all: bool,
+        /// Emit drift reports as a JSON array on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
     /// Start the MCP server in stdio mode.
@@ -101,8 +114,15 @@ enum Cmd {
         force: bool,
     },
 
-    /// Print the Ludwig version.
-    Version,
+    /// Move an existing spec to a different game (or to the specs root).
+    Move {
+        slug: String,
+        /// Destination game. Omit to move to the specs root.
+        #[arg(long = "to-game")]
+        to_game: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
@@ -125,10 +145,6 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.cmd {
-        Cmd::Version => {
-            println!("ludwig {}", ludwig::VERSION);
-            Ok(ExitCode::SUCCESS)
-        }
         Cmd::Init => {
             let cwd = std::env::current_dir()?;
             let written = scaffold::init(&cwd)?;
@@ -150,18 +166,22 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             println!("Created {}", rel.display());
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Parse { path } => {
+        Cmd::Parse { path, quiet } => {
             let project = Project::discover(std::env::current_dir()?)?;
             let paths = paths_for(&project, path)?;
             let mut failures = 0u32;
             for p in &paths {
                 match parser::parse_file(p) {
-                    Ok(doc) => println!(
-                        "  ok  {}  ({} v{})",
-                        rel(&project, p),
-                        doc.id(),
-                        doc.version()
-                    ),
+                    Ok(doc) => {
+                        if !quiet {
+                            println!(
+                                "  ok  {}  ({} v{})",
+                                rel(&project, p),
+                                doc.id(),
+                                doc.version()
+                            );
+                        }
+                    }
                     Err(e) => {
                         failures += 1;
                         println!("  err {}", rel(&project, p));
@@ -172,7 +192,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if failures > 0 {
                 Ok(ExitCode::from(1))
             } else {
-                println!("Parsed {} spec(s); no structural errors.", paths.len());
+                if !quiet {
+                    println!("Parsed {} spec(s); no structural errors.", paths.len());
+                }
                 Ok(ExitCode::SUCCESS)
             }
         }
@@ -189,17 +211,26 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             println!("{}", serde_json::to_string_pretty(&brief)?);
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Verify { id, all, emit_judgment_prompts, ingest_judgments } => {
+        Cmd::Verify { id, all, emit_judgment_prompts, ingest_judgments, json } => {
             let project = Project::discover(std::env::current_dir()?)?;
             let v = verify::Verify::new(&project);
             if let Some(path) = ingest_judgments {
                 v.ingest_judgments(&path)?;
-                println!("Ingested judgments from {}.", path.display());
+                if !json {
+                    println!("Ingested judgments from {}.", path.display());
+                } else {
+                    println!("{}", serde_json::json!({ "ingested_from": path.display().to_string() }));
+                }
                 return Ok(ExitCode::SUCCESS);
             }
             let ids = resolve_ids(&project, id, all)?;
             let mut all_prompts: Vec<verify::JudgmentPrompt> = Vec::new();
-            let mut any_failures = false;
+            let mut all_reports: Vec<verify::Report> = Vec::new();
+            let mut total_pass = 0u32;
+            let mut total_fail = 0u32;
+            let mut total_pending = 0u32;
+            let mut total_skip = 0u32;
+            let mut specs_failed = 0u32;
             for spec_id in &ids {
                 let report = v.run(
                     spec_id,
@@ -207,24 +238,54 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 )?;
                 if emit_judgment_prompts {
                     all_prompts.extend(report.judgment_prompts.iter().cloned());
+                } else if json {
+                    all_reports.push(report.clone());
                 } else {
                     print!("{}", verify::render_text(&report));
                 }
+                total_pass += report.summary.pass;
+                total_fail += report.summary.fail;
+                total_pending += report.summary.pending;
+                total_skip += report.summary.skip;
                 if report.summary.fail > 0 {
-                    any_failures = true;
+                    specs_failed += 1;
                 }
             }
             if emit_judgment_prompts {
                 println!("{}", serde_json::to_string_pretty(&all_prompts)?);
+            } else if json {
+                println!("{}", serde_json::to_string_pretty(&all_reports)?);
+            } else if ids.len() > 1 {
+                // Only print aggregate when the user asked for more than one spec
+                // (--all, or multiple ids). For a single id the per-spec footer
+                // already carries the same information.
+                println!(
+                    "\n{} specs verified ({} ok, {} with failures) — checks: pass={} fail={} pending={} skip={}",
+                    ids.len(),
+                    ids.len() as u32 - specs_failed,
+                    specs_failed,
+                    total_pass,
+                    total_fail,
+                    total_pending,
+                    total_skip,
+                );
             }
-            Ok(if any_failures { ExitCode::from(1) } else { ExitCode::SUCCESS })
+            Ok(if specs_failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
         }
-        Cmd::Diff { id, all } => {
+        Cmd::Diff { id, all, json } => {
             let project = Project::discover(std::env::current_dir()?)?;
             let ids = resolve_ids(&project, id, all)?;
+            let mut reports: Vec<drift::DriftReport> = Vec::new();
             for spec_id in ids {
                 let report = drift::report(&project, &spec_id)?;
-                print!("{}", drift::render_text(&report));
+                if json {
+                    reports.push(report);
+                } else {
+                    print!("{}", drift::render_text(&report));
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reports)?);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -245,19 +306,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if description.trim().is_empty() {
                 anyhow::bail!("no description provided (use --description or pipe on stdin)");
             }
-            let existing_specs_owned: Vec<(String, String, String)> = project
-                .spec_paths()
-                .iter()
-                .filter_map(|p| {
-                    parser::parse_file(p).ok().map(|d| {
-                        (
-                            d.id().to_string(),
-                            d.frontmatter.title.clone(),
-                            d.frontmatter.status.as_str().to_string(),
-                        )
-                    })
-                })
-                .collect();
+            let existing_specs_owned = project.list_existing_specs();
             let existing_specs: Vec<prompts::ExistingSpec<'_>> = existing_specs_owned
                 .iter()
                 .map(|(id, title, status)| prompts::ExistingSpec {
@@ -266,16 +315,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     status,
                 })
                 .collect();
-            let mut existing_games: Vec<String> = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(project.specs_dir()) {
-                for e in rd.flatten() {
-                    if e.path().is_dir()
-                        && let Some(name) = e.file_name().to_str()
-                    {
-                        existing_games.push(name.to_string());
-                    }
-                }
-            }
+            let existing_games = project.list_existing_games();
             println!(
                 "{}",
                 prompts::project_decomposition(
@@ -288,12 +328,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Cmd::Propose { slug, description, game } => {
             let project = Project::discover(std::env::current_dir()?)?;
-            let peers_owned = peer_specs_for(&project, game.as_deref());
+            let peers_owned = project.peer_specs_for(game.as_deref());
             let peers: Vec<prompts::PeerSpec<'_>> = peers_owned
                 .iter()
                 .map(|(id, title)| prompts::PeerSpec { id, title })
                 .collect();
-            let glossary = glossary_for(&project, game.as_deref());
+            let glossary = project.glossary_for(game.as_deref());
             println!(
                 "{}",
                 prompts::spec_from_description(
@@ -336,6 +376,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             println!("Wrote {}", rel.display());
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Move { slug, to_game, force } => {
+            let project = Project::discover(std::env::current_dir()?)?;
+            let target = scaffold::move_spec(&project, &slug, to_game.as_deref(), force)?;
+            let rel = target.strip_prefix(&project.root).unwrap_or(&target);
+            println!("Moved {} → {}", slug, rel.display());
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -376,51 +423,5 @@ fn resolve_ids(
         Ok(vec![id])
     } else {
         anyhow::bail!("specify an ID or pass --all");
-    }
-}
-
-fn peer_specs_for(project: &Project, game_name: Option<&str>) -> Vec<(String, String)> {
-    let dir = match game_name {
-        Some(g) => project.specs_dir().join(g),
-        None => project.specs_dir(),
-    };
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    let mut out: Vec<(String, String)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            if !p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.ends_with(".spec.md"))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if let Ok(doc) = parser::parse_file(&p) {
-                out.push((doc.id().to_string(), doc.frontmatter.title.clone()));
-            }
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-fn glossary_for(project: &Project, game_name: Option<&str>) -> Vec<(String, String)> {
-    let Some(g) = game_name else { return Vec::new() };
-    let manifest = project
-        .specs_dir()
-        .join(g)
-        .join(ludwig::game::Game::MANIFEST_FILE);
-    if !manifest.is_file() {
-        return Vec::new();
-    }
-    match ludwig::game::Game::load(&manifest, project) {
-        Ok(game) => game.glossary.into_iter().collect(),
-        Err(_) => Vec::new(),
     }
 }

@@ -166,6 +166,89 @@ impl Project {
         fs::write(self.state_path(), &bytes)
             .map_err(|e| ProjectError::new(format!("write state: {e}")))
     }
+
+    /// List the `(id, title)` of every spec under `specs/<game>/` (or directly
+    /// under `specs/` if `game_name` is None). Used by CLI and MCP to populate
+    /// the "peer specs" context block in a drafting prompt.
+    pub fn peer_specs_for(&self, game_name: Option<&str>) -> Vec<(String, String)> {
+        let dir = match game_name {
+            Some(g) => self.specs_dir().join(g),
+            None => self.specs_dir(),
+        };
+        if !dir.is_dir() {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                if !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".spec.md"))
+                {
+                    continue;
+                }
+                if let Ok(doc) = parser::parse_file(&p) {
+                    out.push((doc.id().to_string(), doc.frontmatter.title.clone()));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Return the resolved glossary for `specs/<game>/_game.md`, or an empty
+    /// list if no game is named or the manifest is absent. Used by CLI and MCP
+    /// to populate the "glossary" context block in a drafting prompt.
+    pub fn glossary_for(&self, game_name: Option<&str>) -> Vec<(String, String)> {
+        let Some(g) = game_name else { return Vec::new() };
+        let manifest = self.specs_dir().join(g).join(crate::game::Game::MANIFEST_FILE);
+        if !manifest.is_file() {
+            return Vec::new();
+        }
+        match crate::game::Game::load(&manifest, self) {
+            Ok(game) => game.glossary.into_iter().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// List `(id, title, status_str)` of every parseable spec in the project.
+    /// Convenience for prompt-builders that need a stable, pre-sorted summary.
+    pub fn list_existing_specs(&self) -> Vec<(String, String, String)> {
+        self.spec_paths()
+            .iter()
+            .filter_map(|p| {
+                parser::parse_file(p).ok().map(|d| {
+                    (
+                        d.id().to_string(),
+                        d.frontmatter.title.clone(),
+                        d.frontmatter.status.as_str().to_string(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// List the sub-directory names directly under `specs/` — each one is a
+    /// candidate language-game even if it does not yet have a `_game.md`.
+    pub fn list_existing_games(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.specs_dir()) {
+            for e in rd.flatten() {
+                if e.path().is_dir()
+                    && let Some(n) = e.file_name().to_str()
+                {
+                    out.push(n.to_string());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
 }
 
 fn load_config(root: &Path) -> Result<Config, ProjectError> {

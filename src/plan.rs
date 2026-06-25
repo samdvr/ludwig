@@ -213,7 +213,7 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
                         .to_string_lossy()
                         .into_owned(),
                     size: meta.len(),
-                    sha256: hex(&digest),
+                    sha256: crate::util::hex(&digest),
                 });
             }
         } else {
@@ -232,7 +232,7 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
                             .to_string_lossy()
                             .into_owned(),
                         size: meta.len(),
-                        sha256: hex(&digest),
+                        sha256: crate::util::hex(&digest),
                     });
                 }
             }
@@ -313,12 +313,4 @@ fn glob_to_regex(pat: &str) -> String {
     }
     out.push('$');
     out
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }

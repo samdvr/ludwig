@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ProjectError;
 use crate::parser;
-use crate::plan;
 use crate::project::{Project, SpecState};
 use crate::spec::Document;
 
@@ -43,7 +42,7 @@ pub fn body_sha(path: &Path) -> Option<String> {
     let stripped = strip_trailing_comment(text);
     let mut hasher = Sha256::new();
     hasher.update(stripped.as_bytes());
-    Some(hex(&hasher.finalize()))
+    Some(crate::util::hex(&hasher.finalize()))
 }
 
 pub fn strip_trailing_comment(content: &str) -> String {
@@ -53,6 +52,34 @@ pub fn strip_trailing_comment(content: &str) -> String {
     let kept: Vec<&str> =
         content.lines().filter(|line| !TRAILING_COMMENT_RE.is_match(line)).collect();
     let mut out = kept.join("\n");
+    if content.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// Replace every `// ludwig-spec: ...` line in `content` with a fresh stamp built
+/// from `doc`. If no stamp line is present, returns the content unchanged — callers
+/// that need to insert a stamp into an unstamped file should detect that case
+/// separately and surface it as drift.
+pub fn update_stamp_in_place(content: &str, doc: &Document) -> String {
+    let new_stamp = format!(
+        "// ludwig-spec: {}@{} hash={}",
+        doc.id(),
+        doc.version(),
+        doc.canonical_hash()
+    );
+    let lines: Vec<String> = content
+        .lines()
+        .map(|line| {
+            if TRAILING_COMMENT_RE.is_match(line) {
+                new_stamp.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    let mut out = lines.join("\n");
     if content.ends_with('\n') && !out.is_empty() {
         out.push('\n');
     }
@@ -106,7 +133,7 @@ pub fn report(project: &Project, id_or_path: &str) -> Result<DriftReport, Projec
     let mut files: Vec<FileDrift> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for pat in &doc.frontmatter.implements {
-        for p in matched_files(project, pat) {
+        for p in crate::util::matched_files(project, pat, true) {
             if !seen.insert(p.clone()) {
                 continue;
             }
@@ -122,16 +149,6 @@ pub fn report(project: &Project, id_or_path: &str) -> Result<DriftReport, Projec
         canonical_mode: project.canonical_mode().to_string(),
         files,
     })
-}
-
-fn matched_files(project: &Project, pattern: &str) -> Vec<PathBuf> {
-    if plan::contains_glob(pattern) {
-        plan::glob_expand(&project.root, pattern)
-    } else {
-        // Even when the path doesn't exist we still surface it so the caller can
-        // emit a `Missing` drift entry rather than silently dropping the glob.
-        vec![project.root.join(pattern)]
-    }
 }
 
 fn file_status(project: &Project, path: &Path, doc: &Document, entry: Option<&SpecState>) -> FileDrift {
@@ -181,14 +198,30 @@ fn file_status(project: &Project, path: &Path, doc: &Document, entry: Option<&Sp
     }
     let current_hash = doc.canonical_hash();
     if stamp.hash != current_hash {
+        // Distinguish "spec body changed within the same version" from "spec
+        // version was bumped" — the latter usually means the user already
+        // acknowledged a breaking change and the regenerate step is overdue,
+        // while the former is unexpected and worth a different warning.
+        let detail = if stamp.version != doc.version() {
+            format!(
+                "spec was bumped v{} → v{} since this file was generated ({} → {}); regenerate to update",
+                stamp.version,
+                doc.version(),
+                short(stamp.hash),
+                short(&current_hash),
+            )
+        } else {
+            format!(
+                "spec body changed within v{} ({} → {}); bump version: in frontmatter or regenerate",
+                stamp.version,
+                short(stamp.hash),
+                short(&current_hash),
+            )
+        };
         return FileDrift {
             path: rel,
             status: FileDriftStatus::StaleStamp,
-            detail: Some(format!(
-                "spec changed since this file was generated ({} → {})",
-                short(stamp.hash),
-                short(&current_hash),
-            )),
+            detail: Some(detail),
         };
     }
     // Body-change check requires a stored fingerprint.
@@ -212,10 +245,12 @@ fn body_sha_from_str(content: &str) -> Option<String> {
     let stripped = strip_trailing_comment(content);
     let mut hasher = Sha256::new();
     hasher.update(stripped.as_bytes());
-    Some(hex(&hasher.finalize()))
+    Some(crate::util::hex(&hasher.finalize()))
 }
 
-/// Update state.json with the verified spec hash and file fingerprints.
+/// Update state.json with the verified spec hash and file fingerprints. Also
+/// snapshot the spec's canonical body into `.ludwig/cache/<id>@<version>.md`
+/// so future runs can show a meaningful diff between historical versions.
 pub fn record(project: &Project, doc: &Document, files: &[PathBuf]) -> Result<(), ProjectError> {
     let mut state = project.load_state()?;
     let mut implementing_files: BTreeMap<String, String> = BTreeMap::new();
@@ -237,7 +272,33 @@ pub fn record(project: &Project, doc: &Document, files: &[PathBuf]) -> Result<()
             implementing_files,
         },
     );
-    project.write_state(&state)
+    project.write_state(&state)?;
+    cache_canonical_body(project, doc)?;
+    Ok(())
+}
+
+/// Path to the cached canonical body for a given spec id + version, regardless
+/// of whether that file currently exists on disk. Sub-game ids that contain
+/// slashes (`auth/login`) round-trip safely by URL-encoding the slash.
+pub fn cache_path(project: &Project, id: &str, version: u32) -> PathBuf {
+    let safe_id = id.replace('/', "_");
+    project.cache_dir().join(format!("{safe_id}@{version}.md"))
+}
+
+fn cache_canonical_body(project: &Project, doc: &Document) -> Result<(), ProjectError> {
+    let cache_dir = project.cache_dir();
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| ProjectError::new(format!("mkdir {}: {e}", cache_dir.display())))?;
+    let target = cache_path(project, doc.id(), doc.version());
+    // Only write the first time we see this (id, version) pair. If the body
+    // changed within the same version (which the version-mismatch heuristic in
+    // file_status already flags), the original cache stays put — overwriting
+    // would lose the historical snapshot we want to preserve.
+    if target.is_file() {
+        return Ok(());
+    }
+    fs::write(&target, doc.canonical_body.as_bytes())
+        .map_err(|e| ProjectError::new(format!("write {}: {e}", target.display())))
 }
 
 pub fn render_text(report: &DriftReport) -> String {
@@ -270,13 +331,13 @@ pub fn render_text(report: &DriftReport) -> String {
 }
 
 fn short(h: &str) -> &str {
-    if h.len() >= 7 { &h[..7] } else { h }
+    short_hash(h)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+/// Return the first 7 chars of a hash for human-readable display, or the full
+/// string if it is shorter. Uses `get(..7)` rather than `&h[..7]` so non-ASCII
+/// input (should never happen for our hex hashes, but cheap insurance) doesn't
+/// panic.
+pub fn short_hash(h: &str) -> &str {
+    h.get(..7).unwrap_or(h)
 }

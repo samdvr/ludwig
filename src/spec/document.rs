@@ -27,7 +27,7 @@ impl Document {
         let mut hasher = Sha256::new();
         hasher.update(self.canonical_body.as_bytes());
         let digest = hasher.finalize();
-        hex(&digest)
+        crate::util::hex(&digest)
     }
 
     pub fn behavior_tags(&self) -> Vec<&str> {
@@ -49,12 +49,4 @@ impl Document {
     pub fn active_eligible(&self) -> bool {
         self.open_questions.is_empty()
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }

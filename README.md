@@ -128,16 +128,17 @@ verifies — whatever runs `cargo test`.
 |---|---|
 | `ludwig init` | Scaffold `ludwig.yml`, `specs/`, `.ludwig/`, register Claude Code skill |
 | `ludwig new SLUG [--game G]` | Scaffold a new spec from a blank template |
+| `ludwig move SLUG [--to-game G] [--force]` | Relocate an existing spec to a different game |
 | `ludwig decompose` | Emit a prompt to break a project description (stdin or `-d`) into specs |
 | `ludwig propose SLUG -d DESC [-g GAME]` | Emit a prompt for drafting a single spec |
 | `ludwig write-spec SLUG [-g GAME]` | Validate spec markdown on stdin and persist it |
 | `ludwig game-new NAME [-i INTENT] [-x Term:Defn ...]` | Create a language-game manifest |
-| `ludwig parse [PATH]` | Parse one or all specs; report structural errors |
+| `ludwig parse [PATH] [--quiet]` | Parse one or all specs; report structural errors |
 | `ludwig plan ID` | Emit JSON generation brief for the host agent |
-| `ludwig verify [ID] [--all]` | Run the full pipeline; write report under `.ludwig/reports/` |
+| `ludwig verify [ID] [--all] [--json]` | Run the full pipeline; write report under `.ludwig/reports/` |
 | `ludwig verify [ID] --emit-judgment-prompts` | Print judgment prompts as JSON |
 | `ludwig verify --ingest-judgments FILE` | Ingest judgment verdicts back into state.json |
-| `ludwig diff [ID] [--all]` | Surface drift between specs and code |
+| `ludwig diff [ID] [--all] [--json]` | Surface drift between specs and code |
 | `ludwig catalog` | Regenerate `specs/_index.md` |
 | `ludwig mcp [--root PATH]` | Start the MCP server over stdio |
 
@@ -161,8 +162,11 @@ The server discovers the project at each tool call (`$PWD`, then
 | `spec.read` | Return the parsed structure of a spec |
 | `spec.plan` | Generation brief (drives code generation) |
 | `spec.verify` | Run the verification pipeline |
+| `spec.diff` | Drift report between a spec and its implementing files |
 | `spec.propose` | Emit a prompt for drafting a spec from a description |
 | `spec.write` | Validate agent-drafted markdown and persist it |
+| `spec.move` | Relocate a spec into a different game |
+| `spec.ingest_judgments` | Persist judgment verdicts inline (no file path needed) |
 | `project.decompose` | Emit a prompt to break a project into specs + games |
 | `game.create` | Create a language-game (`_game.md`) |
 

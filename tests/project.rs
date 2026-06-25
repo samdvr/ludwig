@@ -147,3 +147,36 @@ fn glossary_inherits_from_parent_directory() {
         Some("a monthly statement.")
     );
 }
+
+#[test]
+fn move_spec_relocates_and_cleans_source_dir() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let p = ludwig::project::Project::open(dir.path()).unwrap();
+    std::fs::create_dir_all(p.specs_dir().join("billing")).unwrap();
+    ludwig::scaffold::new_spec(&p, "billing/charge", Some("billing")).unwrap();
+    assert!(p.specs_dir().join("billing").join("charge.spec.md").is_file());
+
+    let target = ludwig::scaffold::move_spec(&p, "billing/charge", Some("auth"), false).unwrap();
+    assert!(target.is_file());
+    assert!(p.specs_dir().join("auth").join("charge.spec.md").is_file());
+    assert!(!p.specs_dir().join("billing").join("charge.spec.md").is_file());
+    // Source dir is now empty and was cleaned up.
+    assert!(!p.specs_dir().join("billing").is_dir());
+}
+
+#[test]
+fn move_spec_refuses_overwrite_without_force() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let p = ludwig::project::Project::open(dir.path()).unwrap();
+    ludwig::scaffold::new_spec(&p, "thing", None).unwrap();
+    // Hand-write a conflicting destination with the same id under auth/.
+    let auth_dir = p.specs_dir().join("auth");
+    std::fs::create_dir_all(&auth_dir).unwrap();
+    std::fs::write(auth_dir.join("thing.spec.md"), "placeholder").unwrap();
+
+    let err = ludwig::scaffold::move_spec(&p, "thing", Some("auth"), false)
+        .expect_err("must refuse");
+    assert!(err.0.contains("already exists"));
+}

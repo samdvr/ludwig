@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use indexmap::IndexMap;
 use regex::Regex;
@@ -62,7 +62,7 @@ pub fn parse_with_source(input: &str, source: Option<&Path>) -> Result<Document,
         .get("Open questions")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let open_questions = parse_open_questions(&open_questions_text, source);
+    let open_questions = parse_open_questions(&open_questions_text, source)?;
     let implementation_notes = sections
         .get("Implementation notes")
         .map(|s| s.trim().to_string())
@@ -455,17 +455,21 @@ fn parse_invariants(text: &str, source: Option<&Path>) -> Result<Vec<Invariant>,
     Ok(out)
 }
 
-fn parse_open_questions(text: &str, source: Option<&Path>) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
+fn parse_open_questions(text: &str, source: Option<&Path>) -> Result<Vec<String>, ParseError> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
     }
-    // Try bullet extraction; on failure, fall back to a single-entry list of the whole paragraph.
-    match extract_bullets(text, "Open questions", source) {
-        Ok(bullets) => {
-            bullets.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-        }
-        Err(_) => vec![text.to_string()],
-    }
+    // Open questions follows the same shape as Behavior / Invariants / etc.:
+    // a bulleted list. Allowing prose here used to be an exception, but the
+    // split policy made parser behavior hard to predict — every section now
+    // requires bullets.
+    extract_bullets(text, "Open questions", source).map(|bullets| {
+        bullets
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
 }
 
 fn extract_bullets(
@@ -575,8 +579,3 @@ fn build_canonical_body(
     out.push('\n');
     out
 }
-
-// Suppress unused import in path-only mode. Keep the type at module level for the future
-// where parser caches the source path.
-#[allow(dead_code)]
-fn _hold(_: Option<PathBuf>) {}

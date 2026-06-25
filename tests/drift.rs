@@ -153,3 +153,50 @@ fn trailing_stamp_parses_for_sub_game_ids_with_slashes() {
     assert_eq!(parsed.id, "auth/login");
     assert_eq!(parsed.version, 2);
 }
+
+#[test]
+fn record_writes_version_cache() {
+    // Issue 24: record() should snapshot the canonical body so we can show a
+    // meaningful diff between versions later.
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+    let doc = write_doubler_spec(&project);
+
+    ludwig::drift::record(&project, &doc, &[]).unwrap();
+
+    let cache = ludwig::drift::cache_path(&project, doc.id(), doc.version());
+    assert!(cache.is_file(), "expected cache file at {}", cache.display());
+    let body = std::fs::read_to_string(&cache).unwrap();
+    assert!(body.contains("## Intent"), "cache must contain canonical body");
+    assert!(body.contains(doc.id()));
+}
+
+#[test]
+fn drift_distinguishes_version_bump_from_body_edit() {
+    // Issue 23: when the stamp's version doesn't match the spec's current
+    // version, the detail should explicitly call that out (vs. a same-version
+    // body edit, which is the surprising case).
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+    let doc = write_doubler_spec(&project);
+    let src = project.root.join("src").join("stub.rs");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    // Stamp claims an older version + different hash.
+    std::fs::write(
+        &src,
+        format!(
+            "pub fn call_it() -> i32 {{ 42 }}\n// ludwig-spec: {}@99 hash=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+            doc.id(),
+        ),
+    )
+    .unwrap();
+
+    let report = ludwig::drift::report(&project, "stub").unwrap();
+    let detail = report.files[0].detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("v99") && detail.contains("v1"),
+        "expected detail to call out v99 → v1, got: {detail}"
+    );
+}

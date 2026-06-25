@@ -264,6 +264,76 @@ pub fn render_game_manifest(name: &str, intent: Option<&str>, glossary: &[(Strin
     out
 }
 
+/// Move a spec from its current location to `specs/<to_game>/<slug>.spec.md`
+/// (or the project's specs root if `to_game` is None). Reads the source,
+/// re-validates the markdown so the moved spec still parses, then writes the
+/// new file and removes the original. Returns the new path.
+///
+/// `force` overwrites a destination that already exists. The spec id must
+/// match `slug` — moving cannot rename.
+pub fn move_spec(
+    project: &Project,
+    slug: &str,
+    to_game: Option<&str>,
+    force: bool,
+) -> Result<PathBuf, ProjectError> {
+    validate_slug(slug)?;
+    let source = project
+        .find_spec_path(slug)
+        .ok_or_else(|| ProjectError::new(format!("no spec found with id {slug:?}")))?;
+
+    let content = fs::read_to_string(&source)
+        .map_err(|e| ProjectError::new(format!("read {}: {e}", source.display())))?;
+    let doc = parser::parse(&content)
+        .map_err(|e| ProjectError::new(format!("source spec no longer parses: {}", e.message)))?;
+    if doc.id() != slug {
+        return Err(ProjectError::new(format!(
+            "id mismatch: source frontmatter declares {:?}, requested {slug:?}",
+            doc.id()
+        )));
+    }
+
+    let dest_dir = match to_game {
+        Some(g) => project.specs_dir().join(g),
+        None => project.specs_dir(),
+    };
+    fs::create_dir_all(&dest_dir)
+        .map_err(|e| ProjectError::new(format!("mkdir {}: {e}", dest_dir.display())))?;
+    let basename = Path::new(slug)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(slug);
+    let target = dest_dir.join(format!("{basename}.spec.md"));
+
+    if source == target {
+        return Ok(target);
+    }
+    if target.is_file() && !force {
+        let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
+        return Err(ProjectError::new(format!(
+            "destination already exists at {}; pass force: true to overwrite",
+            rel.display()
+        )));
+    }
+
+    fs::write(&target, &content)
+        .map_err(|e| ProjectError::new(format!("write {}: {e}", target.display())))?;
+    fs::remove_file(&source)
+        .map_err(|e| ProjectError::new(format!("remove {}: {e}", source.display())))?;
+
+    // Clean up the source game directory if it's now empty (and isn't the
+    // specs root itself). Leaves a tidy specs/ tree without surprising the
+    // user by removing anything they didn't explicitly own.
+    if let Some(parent) = source.parent()
+        && parent != project.specs_dir()
+        && dir_is_empty(parent)
+    {
+        let _ = fs::remove_dir(parent);
+    }
+
+    Ok(target)
+}
+
 pub fn validate_slug(slug: &str) -> Result<(), ProjectError> {
     static RE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9\-/]*[a-z0-9]$").unwrap());
