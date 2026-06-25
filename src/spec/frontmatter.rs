@@ -100,6 +100,12 @@ impl Frontmatter {
         if version_i < 1 {
             return Err(ParseError::at(source, "frontmatter `version` must be >= 1"));
         }
+        if version_i > u32::MAX as i64 {
+            return Err(ParseError::at(
+                source,
+                format!("frontmatter `version` must be <= {}", u32::MAX),
+            ));
+        }
         let version = version_i as u32;
 
         let owners = optional_string_list(&entries, "owners", source)?;

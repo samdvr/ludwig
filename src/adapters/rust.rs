@@ -105,7 +105,7 @@ pub(crate) fn parse_output(output: &str, exit_code: Option<i32>) -> RunResult {
 // -- rendering ----------------------------------------------------------------
 
 pub(crate) fn file_slug(id: &str) -> String {
-    id.replace('-', "_").replace('/', "_")
+    id.replace(['-', '/'], "_")
 }
 
 fn example_test_name(name: &str) -> String {
@@ -169,7 +169,7 @@ fn render_scaffold(doc: &Document) -> String {
         out.push_str(&format!("fn {test_fn}() {{\n"));
         out.push_str(&format!(
             "    todo!(\"implement example: {}\");\n",
-            ex.name.replace('"', "\\\"")
+            escape_rust_string(&ex.name)
         ));
         out.push_str("}\n\n");
     }
@@ -181,12 +181,19 @@ fn render_scaffold(doc: &Document) -> String {
         out.push_str(&format!("fn {test_fn}() {{\n"));
         out.push_str(&format!(
             "    todo!(\"implement invariant: {}\");\n",
-            inv.text.replace('"', "\\\"")
+            escape_rust_string(&inv.text)
         ));
         out.push_str("}\n\n");
     }
 
     out
+}
+
+/// Escape a string so it is safe to drop inside a Rust `"…"` literal. Backslashes
+/// MUST be escaped before quotes, otherwise `\` → `\\` would re-escape the `"`
+/// emitted by the quote replacement.
+fn escape_rust_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -218,6 +225,49 @@ test test_deterministic_invariant_1 ... ignored
         assert_eq!(
             example_test_name("Quoted \"name\" here"),
             "test_example_quoted_name_here"
+        );
+    }
+
+    #[test]
+    fn render_scaffold_escapes_backslashes_in_string_literals() {
+        // Regression: a backslash in an example/invariant name produced source
+        // like `todo!("…: foo\bar")`, which Rust rejects as an invalid escape.
+        let spec = r#"---
+id: backslash
+title: Backslash
+status: draft
+version: 1
+---
+
+## Intent
+A spec whose example name contains a backslash. The generated test
+file must escape that backslash so cargo can still compile the file
+without manual intervention.
+
+## Behavior
+- thing
+
+## Examples
+```example name="path\to\thing"
+Given a thing
+When it runs
+Then it works
+```
+
+## Invariants
+- {deterministic} backslash-laden \w pattern stays a literal.
+"#;
+        let doc = crate::parser::parse(spec).expect("spec parses");
+        let body = super::render_scaffold(&doc);
+        // The example name and invariant text round-trip with their backslashes
+        // doubled, so the emitted `todo!("…")` is a well-formed Rust literal.
+        assert!(
+            body.contains(r#"todo!("implement example: path\\to\\thing")"#),
+            "example backslashes not escaped:\n{body}"
+        );
+        assert!(
+            body.contains(r#"\\w pattern"#),
+            "invariant backslashes not escaped:\n{body}"
         );
     }
 }

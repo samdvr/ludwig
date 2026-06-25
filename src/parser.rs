@@ -114,7 +114,7 @@ fn split_frontmatter(
     })?;
 
     let front = lines[1..end].join("\n");
-    let body = if end + 1 <= lines.len() {
+    let body = if end < lines.len() {
         lines[end + 1..].join("\n")
     } else {
         String::new()
@@ -319,7 +319,49 @@ fn parse_examples(text: &str, source: Option<&Path>) -> Result<Vec<Example>, Par
         }
     }
 
+    // Two distinct names can still slugify to the same Rust test-fn identifier
+    // (e.g. "burst then throttle" and "burst-then-throttle" both become
+    // `test_example_burst_then_throttle`). Reject these collisions here so the
+    // generated test file is guaranteed to compile.
+    let mut by_slug: std::collections::BTreeMap<String, &str> =
+        std::collections::BTreeMap::new();
+    for e in &examples {
+        let slug = example_test_slug(&e.name);
+        if let Some(prev) = by_slug.insert(slug.clone(), e.name.as_str()) {
+            return Err(ParseError::at(
+                source,
+                format!(
+                    "example names {:?} and {:?} both slugify to {slug:?}; rename one so the generated tests don't collide",
+                    prev, e.name
+                ),
+            ));
+        }
+    }
+
     Ok(examples)
+}
+
+/// Mirror of `adapters::rust::example_test_name` used only for collision checks.
+/// Kept in the parser so spec validation does not depend on adapter internals.
+fn example_test_slug(name: &str) -> String {
+    let mut out = String::from("test_example_");
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    let collapsed: String = out
+        .split('_')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if collapsed.starts_with("test_example_") {
+        collapsed
+    } else {
+        format!("test_example_{collapsed}")
+    }
 }
 
 fn parse_gherkin_steps(
@@ -476,13 +518,13 @@ fn validate_unique_behavior_tags(
 ) -> Result<(), ParseError> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for b in behaviors {
-        if let Some(tag) = &b.tag {
-            if !seen.insert(tag.as_str()) {
-                return Err(ParseError::at(
-                    source,
-                    format!("duplicate behavior tag: {{#{tag}}}"),
-                ));
-            }
+        if let Some(tag) = &b.tag
+            && !seen.insert(tag.as_str())
+        {
+            return Err(ParseError::at(
+                source,
+                format!("duplicate behavior tag: {{#{tag}}}"),
+            ));
         }
     }
     Ok(())

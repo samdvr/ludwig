@@ -52,13 +52,28 @@ pub fn render(project: &Project) -> String {
         for e in entries {
             out.push_str(&format!(
                 "| `{}` | {} | {} | `{}` |\n",
-                e.id,
-                e.title,
+                escape_md_cell(&e.id),
+                escape_md_cell(&e.title),
                 e.status.as_str(),
-                e.path_rel_specs,
+                escape_md_cell(&e.path_rel_specs),
             ));
         }
         out.push('\n');
+    }
+    out
+}
+
+/// Escape characters that would break a Markdown table row: `|` and `\` need
+/// backslash-escaping, newlines must collapse to a single space.
+fn escape_md_cell(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            other => out.push(other),
+        }
     }
     out
 }

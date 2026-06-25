@@ -128,7 +128,7 @@ fn drift_reports_body_changed_after_record() {
     std::fs::write(&src, &initial).unwrap();
 
     // Record the file in state.json (simulating a previous verify).
-    ludwig::drift::record(&project, &doc, &[src.clone()]).unwrap();
+    ludwig::drift::record(&project, &doc, std::slice::from_ref(&src)).unwrap();
 
     // Edit the body without changing the trailing comment.
     let edited = format!(
@@ -142,4 +142,14 @@ fn drift_reports_body_changed_after_record() {
     let report = ludwig::drift::report(&project, "stub").unwrap();
     assert_eq!(report.files.len(), 1);
     assert_eq!(report.files[0].status, ludwig::drift::FileDriftStatus::BodyChanged);
+}
+
+#[test]
+fn trailing_stamp_parses_for_sub_game_ids_with_slashes() {
+    // Regression: the stamp regex used to require `[\w-]+` for the id, which
+    // silently failed to match the `/` separator that sub-game ids use.
+    let stamp = "// ludwig-spec: auth/login@2 hash=abc1234abc1234abc1234abc1234abc1234abc1234abc1234abc1234abc1234ab";
+    let parsed = ludwig::drift::parse_trailing(stamp).expect("stamp must parse");
+    assert_eq!(parsed.id, "auth/login");
+    assert_eq!(parsed.version, 2);
 }

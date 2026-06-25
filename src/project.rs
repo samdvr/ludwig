@@ -136,10 +136,10 @@ impl Project {
             return Some(rooted);
         }
         for p in self.spec_paths() {
-            if let Ok(doc) = parser::parse_file(&p) {
-                if doc.id() == id_or_path {
-                    return Some(p);
-                }
+            if let Ok(doc) = parser::parse_file(&p)
+                && doc.id() == id_or_path
+            {
+                return Some(p);
             }
         }
         None

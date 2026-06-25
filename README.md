@@ -258,9 +258,6 @@ Deferred:
 - `canonical: code` mode (spec-from-code)
 - Adapters for other languages
 
-See `plan.md` for the design and the milestone-by-milestone history of the
-Ruby → Rust migration.
-
 ## Development
 
 ```bash

@@ -5,7 +5,7 @@ status: active
 owners:
   - sam
 implements:
-  - src/rate_limit/token_bucket.rb
+  - src/rate_limit/token_bucket.rs
 depends_on:
   - clock-source
 version: 4

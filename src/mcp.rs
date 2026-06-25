@@ -79,9 +79,7 @@ impl Server {
         let id = req.id.clone();
         let result = self.dispatch(&req.method, &req.params);
         // Notifications (no id) get no response.
-        if id.is_none() {
-            return None;
-        }
+        id.as_ref()?;
         Some(match result {
             Ok(value) => ResponseValue { id, payload: Ok(value) },
             Err(err) => ResponseValue { id, payload: Err(err) },
@@ -378,10 +376,10 @@ impl Server {
         let mut games: Vec<String> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(project.specs_dir()) {
             for e in rd.flatten() {
-                if e.path().is_dir() {
-                    if let Some(n) = e.file_name().to_str() {
-                        games.push(n.to_string());
-                    }
+                if e.path().is_dir()
+                    && let Some(n) = e.file_name().to_str()
+                {
+                    games.push(n.to_string());
                 }
             }
         }

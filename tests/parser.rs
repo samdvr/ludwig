@@ -27,7 +27,7 @@ fn parses_token_bucket_fixture() {
     assert_eq!(doc.frontmatter.owners, vec!["sam".to_string()]);
     assert_eq!(
         doc.frontmatter.implements,
-        vec!["src/rate_limit/token_bucket.rb".to_string()]
+        vec!["src/rate_limit/token_bucket.rs".to_string()]
     );
     assert_eq!(doc.frontmatter.depends_on, vec!["clock-source".to_string()]);
 }
@@ -277,6 +277,84 @@ Then it works
     assert!(
         err.message.contains("duplicate behavior tag"),
         "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn example_names_that_slugify_to_the_same_test_fn_are_rejected() {
+    // "burst then throttle" and "burst-then-throttle" both become the test fn
+    // `test_example_burst_then_throttle`, which would fail to compile.
+    let spec = r#"---
+id: collide
+title: Slug Collision
+status: draft
+version: 1
+---
+
+## Intent
+A spec whose two example names look distinct to humans but slugify to
+the same Rust test function. The parser must reject this so the
+generated test file is guaranteed to compile cleanly.
+
+## Behavior
+- thing
+
+## Examples
+```example name="burst then throttle"
+Given a thing
+When it runs
+Then it works
+```
+
+```example name="burst-then-throttle"
+Given a thing
+When it runs
+Then it works
+```
+
+## Invariants
+- {deterministic} ok
+"#;
+    let err = ludwig::parser::parse(spec).expect_err("should fail");
+    assert!(
+        err.message.contains("slugify"),
+        "expected slug-collision error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn frontmatter_version_above_u32_max_is_rejected() {
+    let spec = r#"---
+id: bigver
+title: Big Version
+status: draft
+version: 5000000000
+---
+
+## Intent
+A spec whose version overflows u32. The parser must reject this so we
+don't silently wrap the value when casting to the canonical `u32`
+representation used everywhere downstream.
+
+## Behavior
+- thing
+
+## Examples
+```example name="x"
+Given a thing
+When it runs
+Then it works
+```
+
+## Invariants
+- {deterministic} ok
+"#;
+    let err = ludwig::parser::parse(spec).expect_err("should fail");
+    assert!(
+        err.message.contains("version") && err.message.contains("<="),
+        "expected version-overflow error, got: {}",
         err.message
     );
 }

@@ -33,10 +33,10 @@ impl Game {
                 break;
             }
             let manifest = dir.join(Self::MANIFEST_FILE);
-            if manifest.is_file() {
-                if let Ok(game) = Self::load(&manifest, project) {
-                    stack.insert(0, game);
-                }
+            if manifest.is_file()
+                && let Ok(game) = Self::load(&manifest, project)
+            {
+                stack.insert(0, game);
             }
             if dir == specs_root {
                 break;
@@ -122,7 +122,7 @@ fn split_frontmatter(
         ParseError::at(Some(source), "unterminated _game.md frontmatter")
     })?;
     let front_yaml = lines[1..end].join("\n");
-    let body = if end + 1 <= lines.len() {
+    let body = if end < lines.len() {
         lines[end + 1..].join("\n")
     } else {
         String::new()

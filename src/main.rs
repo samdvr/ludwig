@@ -269,10 +269,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let mut existing_games: Vec<String> = Vec::new();
             if let Ok(rd) = std::fs::read_dir(project.specs_dir()) {
                 for e in rd.flatten() {
-                    if e.path().is_dir() {
-                        if let Some(name) = e.file_name().to_str() {
-                            existing_games.push(name.to_string());
-                        }
+                    if e.path().is_dir()
+                        && let Some(name) = e.file_name().to_str()
+                    {
+                        existing_games.push(name.to_string());
                     }
                 }
             }

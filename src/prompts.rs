@@ -39,7 +39,7 @@ title: Token-bucket rate limiter
 status: draft
 owners: []
 implements:
-  - src/rate_limit/token_bucket.rb
+  - src/rate_limit/token_bucket.rs
 depends_on: []
 version: 1
 ---

@@ -196,46 +196,44 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
         let pat_str = full.to_string_lossy().into_owned();
         // Use a tiny glob substitute: only match exact paths (no globbing characters)
         // *or* shell-style trailing-* expansion by walking the directory. For v0.1 the
-        // existing Ruby tests use exact paths and `src/foo.*` style — implement the
+        // existing tests use exact paths and `src/foo.*` style — implement the
         // exact-path case first, defer the wildcard case to drift/verify.
         if !contains_glob(&pat_str) {
-            if let Ok(meta) = std::fs::metadata(&full) {
-                if meta.is_file() {
-                    if let Ok(bytes) = fs::read(&full) {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&bytes);
-                        let digest = hasher.finalize();
-                        out.push(FileFingerprint {
-                            path: full
-                                .strip_prefix(&project.root)
-                                .unwrap_or(&full)
-                                .to_string_lossy()
-                                .into_owned(),
-                            size: meta.len(),
-                            sha256: hex(&digest),
-                        });
-                    }
-                }
+            if let Ok(meta) = std::fs::metadata(&full)
+                && meta.is_file()
+                && let Ok(bytes) = fs::read(&full)
+            {
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                let digest = hasher.finalize();
+                out.push(FileFingerprint {
+                    path: full
+                        .strip_prefix(&project.root)
+                        .unwrap_or(&full)
+                        .to_string_lossy()
+                        .into_owned(),
+                    size: meta.len(),
+                    sha256: hex(&digest),
+                });
             }
         } else {
             for matched in glob_expand(&project.root, pat) {
-                if let Ok(meta) = std::fs::metadata(&matched) {
-                    if meta.is_file() {
-                        if let Ok(bytes) = fs::read(&matched) {
-                            let mut hasher = Sha256::new();
-                            hasher.update(&bytes);
-                            let digest = hasher.finalize();
-                            out.push(FileFingerprint {
-                                path: matched
-                                    .strip_prefix(&project.root)
-                                    .unwrap_or(&matched)
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                size: meta.len(),
-                                sha256: hex(&digest),
-                            });
-                        }
-                    }
+                if let Ok(meta) = std::fs::metadata(&matched)
+                    && meta.is_file()
+                    && let Ok(bytes) = fs::read(&matched)
+                {
+                    let mut hasher = Sha256::new();
+                    hasher.update(&bytes);
+                    let digest = hasher.finalize();
+                    out.push(FileFingerprint {
+                        path: matched
+                            .strip_prefix(&project.root)
+                            .unwrap_or(&matched)
+                            .to_string_lossy()
+                            .into_owned(),
+                        size: meta.len(),
+                        sha256: hex(&digest),
+                    });
                 }
             }
         }
@@ -257,11 +255,13 @@ fn regenerating_hint(project: &Project, id: &str, current_version: u32) -> Regen
 }
 
 pub(crate) fn contains_glob(pat: &str) -> bool {
-    pat.contains('*') || pat.contains('?') || pat.contains('[')
+    pat.contains('*') || pat.contains('?')
 }
 
-/// Hand-rolled glob: only supports `*` (any chars except `/`) and `**` (any chars).
-/// Adequate for the patterns the spec system uses (`src/foo/*.rb`, `src/foo.*`).
+/// Hand-rolled glob: only supports `*` (any chars except `/`), `**` (any chars),
+/// and `?` (single char except `/`). Adequate for the patterns the spec system
+/// uses (`src/foo/*.rs`, `src/foo.*`). Bracket character classes are NOT
+/// supported — `[` and `]` are escaped so they are matched literally.
 pub(crate) fn glob_expand(root: &std::path::Path, pattern: &str) -> Vec<PathBuf> {
     let regex_str = glob_to_regex(pattern);
     let re = match regex::Regex::new(&regex_str) {
@@ -300,7 +300,10 @@ fn glob_to_regex(pat: &str) -> String {
             out.push_str("[^/]*");
         } else if c == '?' {
             out.push_str("[^/]");
-        } else if matches!(c, '.' | '+' | '(' | ')' | '|' | '^' | '$' | '\\' | '{' | '}') {
+        } else if matches!(
+            c,
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '\\' | '{' | '}' | '[' | ']'
+        ) {
             out.push('\\');
             out.push(c);
         } else {

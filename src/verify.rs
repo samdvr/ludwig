@@ -108,7 +108,7 @@ impl<'a> Verify<'a> {
         let mut checks: Vec<Check> = Vec::new();
         checks.extend(self.structural_checks(&doc));
 
-        // Render + run the adapter (Ruby for v0.1).
+        // Render + run the Rust test adapter.
         let adapter = adapters::for_project(self.project);
         adapter.render(&doc)?;
         let run_result = adapter.run(&doc)?;
@@ -349,10 +349,10 @@ pub fn render_text(report: &Report) -> String {
             _ => "??  ",
         };
         out.push_str(&format!("  [{mark}] {}: {}", c.kind, c.name));
-        if let Some(d) = c.detail.as_deref() {
-            if !d.is_empty() {
-                out.push_str(&format!(" — {d}"));
-            }
+        if let Some(d) = c.detail.as_deref()
+            && !d.is_empty()
+        {
+            out.push_str(&format!(" — {d}"));
         }
         out.push('\n');
     }
