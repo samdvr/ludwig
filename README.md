@@ -3,11 +3,7 @@
 A specification-driven development framework whose specs are written as close
 to natural language as possible. The same prose-first markdown spec drives
 LLM code generation **and** verifies the resulting code. Named after
-Wittgenstein: meaning is use, language-games, family resemblance.
-
-> The trailing `ludwig-spec:` comment in every generated source file makes the
-> relationship between language and world visible at the seam. That's the
-> point.
+Ludwig Wittgenstein.
 
 ## Why
 
