@@ -17,7 +17,10 @@ fn init_is_idempotent() {
     let dir = TempDir::new("ludwig-test");
     let first = ludwig::scaffold::init(dir.path()).unwrap();
     let second = ludwig::scaffold::init(dir.path()).unwrap();
-    assert!(second.len() < first.len(), "second run should write fewer files");
+    assert!(
+        second.len() < first.len(),
+        "second run should write fewer files"
+    );
 }
 
 #[test]
@@ -87,7 +90,10 @@ fn find_spec_path_by_id() {
     let p = ludwig::project::Project::open(dir.path()).unwrap();
     ludwig::scaffold::new_spec(&p, "found-me", None).unwrap();
     let path = p.find_spec_path("found-me").expect("found");
-    assert_eq!(path.file_name().unwrap().to_str().unwrap(), "found-me.spec.md");
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "found-me.spec.md"
+    );
 }
 
 #[test]
@@ -133,8 +139,7 @@ fn glossary_inherits_from_parent_directory() {
     )
     .unwrap();
 
-    let spec_path =
-        ludwig::scaffold::new_spec(&p, "billing/charge", Some("billing")).unwrap();
+    let spec_path = ludwig::scaffold::new_spec(&p, "billing/charge", Some("billing")).unwrap();
     let game = ludwig::game::Game::for_spec(&p, &spec_path);
 
     assert_eq!(game.name, "billing");
@@ -155,12 +160,22 @@ fn move_spec_relocates_and_cleans_source_dir() {
     let p = ludwig::project::Project::open(dir.path()).unwrap();
     std::fs::create_dir_all(p.specs_dir().join("billing")).unwrap();
     ludwig::scaffold::new_spec(&p, "billing/charge", Some("billing")).unwrap();
-    assert!(p.specs_dir().join("billing").join("charge.spec.md").is_file());
+    assert!(
+        p.specs_dir()
+            .join("billing")
+            .join("charge.spec.md")
+            .is_file()
+    );
 
     let target = ludwig::scaffold::move_spec(&p, "billing/charge", Some("auth"), false).unwrap();
     assert!(target.is_file());
     assert!(p.specs_dir().join("auth").join("charge.spec.md").is_file());
-    assert!(!p.specs_dir().join("billing").join("charge.spec.md").is_file());
+    assert!(
+        !p.specs_dir()
+            .join("billing")
+            .join("charge.spec.md")
+            .is_file()
+    );
     // Source dir is now empty and was cleaned up.
     assert!(!p.specs_dir().join("billing").is_dir());
 }
@@ -176,8 +191,8 @@ fn move_spec_refuses_overwrite_without_force() {
     std::fs::create_dir_all(&auth_dir).unwrap();
     std::fs::write(auth_dir.join("thing.spec.md"), "placeholder").unwrap();
 
-    let err = ludwig::scaffold::move_spec(&p, "thing", Some("auth"), false)
-        .expect_err("must refuse");
+    let err =
+        ludwig::scaffold::move_spec(&p, "thing", Some("auth"), false).expect_err("must refuse");
     assert!(err.0.contains("already exists"));
 }
 
@@ -224,7 +239,11 @@ fn state_write_leaves_no_temp_residue() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     files.sort();
-    assert_eq!(files, vec!["state.json".to_string()], "unexpected files: {files:?}");
+    assert_eq!(
+        files,
+        vec!["state.json".to_string()],
+        "unexpected files: {files:?}"
+    );
 }
 
 /// {#b4} The state directory is created first if it does not yet exist.
@@ -236,4 +255,52 @@ fn state_write_creates_state_dir_if_absent() {
     assert!(!project.state_dir().is_dir());
     project.write_state(&sample_state()).unwrap();
     assert!(project.state_path().is_file());
+}
+
+// -- atomic / guarded writes ---------------------------------------
+
+/// write_guarded with overwrite=false refuses to clobber an existing file
+/// (create_new closes the TOCTOU window an is_file() pre-check leaves open).
+#[test]
+fn write_guarded_refuses_to_clobber_when_not_overwriting() {
+    let dir = TempDir::new("ludwig-test");
+    let target = dir.path().join("f.txt");
+    std::fs::write(&target, b"original").unwrap();
+
+    let err = ludwig::util::write_guarded(&target, b"new", false).expect_err("must refuse");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    // Original content is untouched.
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+}
+
+/// write_guarded with overwrite=true replaces the file atomically and leaves no
+/// temp residue behind.
+#[test]
+fn write_guarded_overwrites_atomically_without_residue() {
+    let dir = TempDir::new("ludwig-test");
+    let target = dir.path().join("f.txt");
+    std::fs::write(&target, b"original").unwrap();
+
+    ludwig::util::write_guarded(&target, b"replaced", true).unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "replaced");
+
+    let stray: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "f.txt")
+        .collect();
+    assert!(stray.is_empty(), "unexpected leftover files: {stray:?}");
+}
+
+/// new_spec twice for the same id errors the second time rather than silently
+/// overwriting the first.
+#[test]
+fn new_spec_refuses_duplicate() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let p = ludwig::project::Project::open(dir.path()).unwrap();
+    ludwig::scaffold::new_spec(&p, "thing", None).unwrap();
+    let err = ludwig::scaffold::new_spec(&p, "thing", None).expect_err("must refuse");
+    assert!(err.0.contains("already exists"));
 }

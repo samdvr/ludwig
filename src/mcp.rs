@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::drift;
@@ -50,17 +50,12 @@ pub const TOOL_NAMES: &[&str] = &[
     "game.create",
 ];
 
-#[derive(Debug, Deserialize)]
-struct Request {
-    #[allow(dead_code)]
-    #[serde(default)]
-    jsonrpc: String,
-    #[serde(default)]
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
+/// Tools that compile and execute project code as a side effect. `spec.verify`
+/// shells out to `cargo test`, which runs whatever lives in `tests/ludwig_*.rs`
+/// — arbitrary code execution. When the server is locked down (`--no-exec`)
+/// these are hidden from `tools/list` and refused by the dispatcher, leaving the
+/// read-only spec tools available to an untrusted client.
+const EXEC_TOOLS: &[&str] = &["spec.verify"];
 
 #[derive(Debug, Serialize)]
 pub struct ErrorObject {
@@ -71,11 +66,21 @@ pub struct ErrorObject {
 pub struct Server {
     explicit_project: Option<Project>,
     root_override: Option<PathBuf>,
+    /// When false, code-executing tools ([`EXEC_TOOLS`]) are unavailable. Default
+    /// true to preserve the local-developer experience; set via [`Server::with_exec`].
+    allow_exec: bool,
 }
 
 impl Server {
     pub fn new(project: Option<Project>, root: Option<PathBuf>) -> Self {
-        Self { explicit_project: project, root_override: root }
+        Self { explicit_project: project, root_override: root, allow_exec: true }
+    }
+
+    /// Enable or disable code-executing tools. Pass `false` when exposing the
+    /// server to an untrusted client to drop `spec.verify` from the surface.
+    pub fn with_exec(mut self, allow: bool) -> Self {
+        self.allow_exec = allow;
+        self
     }
 
     /// Run the server over stdin/stdout until EOF.
@@ -98,10 +103,12 @@ impl Server {
         Ok(())
     }
 
-    /// Process a single request line; returns `None` for notifications (no id).
+    /// Process a single request line; returns `None` for notifications (a
+    /// message with no `id` member). An explicit `"id": null` is a request and
+    /// gets a response, per JSON-RPC 2.0.
     pub fn handle_line(&self, line: &str) -> Option<ResponseValue> {
-        let req: Request = match serde_json::from_str(line) {
-            Ok(r) => r,
+        let value: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
             Err(e) => {
                 return Some(ResponseValue {
                     id: None,
@@ -112,10 +119,42 @@ impl Server {
                 });
             }
         };
-        let id = req.id.clone();
-        let result = self.dispatch(&req.method, &req.params);
-        // Notifications (no id) get no response.
-        id.as_ref()?;
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => {
+                return Some(ResponseValue {
+                    id: None,
+                    payload: Err(ErrorObject {
+                        code: -32600,
+                        message: "invalid request: expected a JSON object".to_string(),
+                    }),
+                });
+            }
+        };
+        // Notifications are distinguished by the *absence* of `id`; a present
+        // `id` (even `null`) means a response is expected.
+        let has_id = obj.contains_key("id");
+        let id = obj.get("id").cloned();
+        let method = match obj.get("method").and_then(|m| m.as_str()) {
+            Some(m) => m.to_string(),
+            None => {
+                // Structurally valid JSON but not a valid Request → -32600.
+                // The id (null when absent) is echoed back per the spec.
+                return Some(ResponseValue {
+                    id,
+                    payload: Err(ErrorObject {
+                        code: -32600,
+                        message: "invalid request: missing method".to_string(),
+                    }),
+                });
+            }
+        };
+        let params = obj.get("params").cloned().unwrap_or(Value::Null);
+        let result = self.dispatch(&method, &params);
+        // Notifications (no id member) get no response.
+        if !has_id {
+            return None;
+        }
         Some(match result {
             Ok(value) => ResponseValue { id, payload: Ok(value) },
             Err(err) => ResponseValue { id, payload: Err(err) },
@@ -133,7 +172,7 @@ impl Server {
             })),
             "initialized" | "notifications/initialized" => Ok(Value::Null),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tool_descriptors() })),
+            "tools/list" => Ok(json!({ "tools": self.advertised_tools() })),
             "tools/call" => self.call_tool(params),
             "resources/list" => Ok(json!({ "resources": self.resource_descriptors() })),
             "resources/read" => self.read_resource(params),
@@ -165,6 +204,19 @@ impl Server {
 
     fn project_available(&self) -> Option<Project> {
         self.project().ok()
+    }
+
+    /// The tool descriptors to advertise over `tools/list`, dropping
+    /// code-executing tools when the server is locked down so a client never
+    /// sees a tool it would be refused.
+    fn advertised_tools(&self) -> Vec<Value> {
+        tool_descriptors()
+            .into_iter()
+            .filter(|d| {
+                let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                self.allow_exec || !EXEC_TOOLS.contains(&name)
+            })
+            .collect()
     }
 
     fn resource_descriptors(&self) -> Vec<Value> {
@@ -246,21 +298,32 @@ impl Server {
                 code: -32602,
                 message: "missing tool name".to_string(),
             })?;
+        // Refuse code-executing tools when locked down. Reported as a -32602
+        // (invalid params) so the calling model sees it as "this tool isn't
+        // available here", consistent with how `tools/list` hides it.
+        if !self.allow_exec && EXEC_TOOLS.contains(&name) {
+            return Err(ErrorObject {
+                code: -32602,
+                message: format!(
+                    "tool {name:?} is disabled: this server was started with --no-exec"
+                ),
+            });
+        }
         let empty = Value::Object(Default::default());
         let args = params.get("arguments").unwrap_or(&empty);
 
-        let result: Value = match name {
-            "spec.list" => self.tool_spec_list()?,
-            "spec.read" => self.tool_spec_read(args)?,
-            "spec.plan" => self.tool_spec_plan(args)?,
-            "spec.verify" => self.tool_spec_verify(args)?,
-            "spec.diff" => self.tool_spec_diff(args)?,
-            "spec.propose" => Value::String(self.tool_spec_propose(args)?),
-            "spec.write" => self.tool_spec_write(args)?,
-            "spec.move" => self.tool_spec_move(args)?,
-            "spec.ingest_judgments" => self.tool_spec_ingest_judgments(args)?,
-            "project.decompose" => Value::String(self.tool_project_decompose(args)?),
-            "game.create" => self.tool_game_create(args)?,
+        let result: Result<Value, ErrorObject> = match name {
+            "spec.list" => self.tool_spec_list(),
+            "spec.read" => self.tool_spec_read(args),
+            "spec.plan" => self.tool_spec_plan(args),
+            "spec.verify" => self.tool_spec_verify(args),
+            "spec.diff" => self.tool_spec_diff(args),
+            "spec.propose" => self.tool_spec_propose(args).map(Value::String),
+            "spec.write" => self.tool_spec_write(args),
+            "spec.move" => self.tool_spec_move(args),
+            "spec.ingest_judgments" => self.tool_spec_ingest_judgments(args),
+            "project.decompose" => self.tool_project_decompose(args).map(Value::String),
+            "game.create" => self.tool_game_create(args),
             other => {
                 return Err(ErrorObject {
                     code: -32602,
@@ -268,11 +331,28 @@ impl Server {
                 });
             }
         };
-        let text = match &result {
-            Value::String(s) => s.clone(),
-            other => serde_json::to_string_pretty(other).unwrap_or_default(),
-        };
-        Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+        match result {
+            Ok(value) => {
+                let text = match &value {
+                    Value::String(s) => s.clone(),
+                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                };
+                Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "isError": false
+                }))
+            }
+            // Malformed-params failures (-32602) stay protocol-level JSON-RPC
+            // errors. Genuine tool-execution failures (verify failed, no such
+            // spec, internal errors) surface as a tool result with
+            // `isError: true` so the calling model can see and react to them,
+            // per the MCP spec — they are not transport failures.
+            Err(err) if err.code == -32602 => Err(err),
+            Err(err) => Ok(json!({
+                "content": [{ "type": "text", "text": err.message }],
+                "isError": true
+            })),
+        }
     }
 
     fn tool_spec_list(&self) -> Result<Value, ErrorObject> {
@@ -348,21 +428,21 @@ impl Server {
     fn tool_spec_plan(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
-        confine_spec_id(&project, id)?;
-        let brief = plan::brief_for(&project, id).map_err(project_to_rpc)?;
+        let path = confine_spec_id(&project, id)?;
+        let brief = plan::brief_for_path(&project, &path).map_err(project_to_rpc)?;
         Ok(serde_json::to_value(&brief).unwrap_or_default())
     }
 
     fn tool_spec_verify(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
-        confine_spec_id(&project, id)?;
+        let path = confine_spec_id(&project, id)?;
         let emit = args
             .get("emit_judgment_prompts")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let report = verify::Verify::new(&project)
-            .run(id, RunOptions { emit_judgment_prompts: emit })
+            .run_path(&path, RunOptions { emit_judgment_prompts: emit })
             .map_err(|e| ErrorObject {
                 code: -32603,
                 message: format!("verify failed: {e}"),
@@ -373,8 +453,8 @@ impl Server {
     fn tool_spec_diff(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
-        confine_spec_id(&project, id)?;
-        let report = drift::report(&project, id).map_err(project_to_rpc)?;
+        let path = confine_spec_id(&project, id)?;
+        let report = drift::report_for_path(&project, &path).map_err(project_to_rpc)?;
         Ok(serde_json::to_value(&report).unwrap_or_default())
     }
 
@@ -590,21 +670,19 @@ fn known_judgment_keys(project: &Project) -> std::collections::HashSet<String> {
     keys
 }
 
-/// Confine an MCP-supplied spec id to the project. Ids arrive straight from the
-/// client, and `plan`/`verify`/`drift` all accept an id-*or-path*, so before we
-/// hand one to those resolvers we confirm it names a real spec inside the specs
-/// directory via [`Project::find_spec_by_id`]. A traversal or absolute-path id
+/// Confine an MCP-supplied spec id to the project and return its resolved path.
+/// Ids arrive straight from the client, and `plan`/`verify`/`drift` all accept
+/// an id-*or-path*, so before we hand work to those resolvers we confirm the id
+/// names a real spec inside the specs directory via [`Project::find_spec_by_id`]
+/// and pass the resolved path straight through — both confining the lookup and
+/// sparing a second full scan of the specs tree. A traversal or absolute-path id
 /// matches nothing and is rejected with a plain "no such spec" — we deliberately
 /// do not echo the probed filesystem path back to the client.
-fn confine_spec_id(project: &Project, id: &str) -> Result<(), ErrorObject> {
-    if project.find_spec_by_id(id).is_some() {
-        Ok(())
-    } else {
-        Err(ErrorObject {
-            code: -32602,
-            message: "no such spec".to_string(),
-        })
-    }
+fn confine_spec_id(project: &Project, id: &str) -> Result<PathBuf, ErrorObject> {
+    project.find_spec_by_id(id).ok_or_else(|| ErrorObject {
+        code: -32602,
+        message: "no such spec".to_string(),
+    })
 }
 
 /// Serialize a response to a JSON-RPC line. The response types are constructed

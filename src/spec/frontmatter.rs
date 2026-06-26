@@ -112,6 +112,23 @@ impl Frontmatter {
         let implements = optional_string_list(&entries, "implements", source)?;
         let depends_on = optional_string_list(&entries, "depends_on", source)?;
 
+        // `implements:` patterns are spec-controlled and a spec can arrive from
+        // an untrusted MCP client. Reject any pattern that escapes the project
+        // tree (absolute, drive-prefixed, or containing `..`) at validation time
+        // so it can never be persisted, let alone expanded by verify/drift. See
+        // spec `mcp-path-confinement`.
+        for pat in &implements {
+            if crate::util::pattern_escapes_root(pat) {
+                return Err(ParseError::at(
+                    source,
+                    format!(
+                        "frontmatter `implements` entry {pat:?} must be a project-relative path \
+                         (no leading `/`, drive prefix, or `..` segments)"
+                    ),
+                ));
+            }
+        }
+
         let hash = match entries.get("hash") {
             None | Some(YamlValue::Null) => None,
             Some(YamlValue::String(s)) => Some(s.clone()),

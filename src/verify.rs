@@ -90,17 +90,31 @@ pub struct RunOptions {
 }
 
 impl<'a> Verify<'a> {
-    pub fn new(project: &'a Project) -> Self { Self { project } }
+    pub fn new(project: &'a Project) -> Self {
+        Self { project }
+    }
 
     pub fn run(&self, id: &str, opts: RunOptions) -> Result<Report, crate::Error> {
         let path = self
             .project
             .find_spec_path(id)
             .ok_or_else(|| VerifyError::new(format!("no spec found with id {id:?}")))?;
-        let doc = parser::parse_file(&path)?;
+        self.run_path(&path, opts)
+    }
+
+    /// Run the verification pipeline against an already-resolved spec path. The
+    /// MCP layer calls this with the path returned by its confinement check so a
+    /// single `spec.verify` request does not re-scan and re-parse every spec
+    /// twice before doing any real work.
+    pub fn run_path(
+        &self,
+        path: &std::path::Path,
+        opts: RunOptions,
+    ) -> Result<Report, crate::Error> {
+        let doc = parser::parse_file(path)?;
         let spec_path_rel = path
             .strip_prefix(&self.project.root)
-            .unwrap_or(&path)
+            .unwrap_or(path)
             .to_string_lossy()
             .into_owned();
 
@@ -128,7 +142,11 @@ impl<'a> Verify<'a> {
         // Render + run the Rust test adapter.
         let adapter = adapters::for_project(self.project);
         let render_info = adapter.render(&doc)?;
-        checks.extend(test_file_stamp_check(&render_info.spec_file, &self.project.root, &doc));
+        checks.extend(test_file_stamp_check(
+            &render_info.spec_file,
+            &self.project.root,
+            &doc,
+        ));
         let run_result = adapter.run(&doc)?;
         checks.extend(deterministic_checks(&doc, &run_result));
         checks.extend(missing_test_checks(&doc, &run_result));
@@ -182,7 +200,12 @@ impl<'a> Verify<'a> {
 
     fn structural_checks(&self, doc: &Document) -> Vec<Check> {
         let mut out: Vec<Check> = Vec::new();
-        out.push(Check::new("structural", "parseable", "pass", Some("parsed cleanly".into())));
+        out.push(Check::new(
+            "structural",
+            "parseable",
+            "pass",
+            Some("parsed cleanly".into()),
+        ));
         out.push(Check::new(
             "structural",
             "frontmatter-version",
@@ -320,14 +343,17 @@ impl<'a> Verify<'a> {
 
     fn persist_report(&self, report: &Report) -> Result<(), crate::Error> {
         let dir = self.project.reports_dir();
-        fs::create_dir_all(&dir)
-            .map_err(|e| VerifyError::new(format!("mkdir reports: {e}")))?;
+        fs::create_dir_all(&dir).map_err(|e| VerifyError::new(format!("mkdir reports: {e}")))?;
         let ts = OffsetDateTime::now_utc()
-            .format(&iso8601::Iso8601::<{
-                iso8601::Config::DEFAULT
-                    .set_formatted_components(iso8601::FormattedComponents::DateTime)
-                    .encode()
-            }>)
+            .format(
+                &iso8601::Iso8601::<
+                    {
+                        iso8601::Config::DEFAULT
+                            .set_formatted_components(iso8601::FormattedComponents::DateTime)
+                            .encode()
+                    },
+                >,
+            )
             .unwrap_or_else(|_| "ts".to_string())
             .replace(['-', ':'], "")
             .replace('.', "");
@@ -388,6 +414,33 @@ pub fn render_text(report: &Report) -> String {
     out
 }
 
+/// Pull the most useful lines out of raw cargo/rustc output for a failure
+/// detail. Prefers rustc error lines (and their `-->` location lines); falls
+/// back to the tail of the output. Capped so a report line stays readable.
+fn compiler_error_excerpt(raw: &str) -> String {
+    let errors: Vec<&str> = raw
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("error") || t.starts_with("-->")
+        })
+        .take(12)
+        .collect();
+    let chosen: Vec<&str> = if errors.is_empty() {
+        let mut tail: Vec<&str> = raw
+            .lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(8)
+            .collect();
+        tail.reverse();
+        tail
+    } else {
+        errors
+    };
+    truncate(chosen.join("\n").trim(), 1200)
+}
+
 fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec<Check> {
     let mut out: Vec<Check> = Vec::new();
     for t in &run.tests {
@@ -411,21 +464,37 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
         };
         let detail = match t.status {
             TestStatus::Skip => Some("test ignored — fill in the `todo!()` body".into()),
-            TestStatus::Fail => {
-                Some("see report `.ludwig/reports/latest.md` for details".into())
-            }
+            TestStatus::Fail => Some("see report `.ludwig/reports/latest.md` for details".into()),
             TestStatus::Pass => None,
         };
-        out.push(Check::new("deterministic", format!("{kind}:{name}"), status, detail));
+        out.push(Check::new(
+            "deterministic",
+            format!("{kind}:{name}"),
+            status,
+            detail,
+        ));
     }
     if run.tests.is_empty() {
+        // No parseable `test … ok/FAILED` lines. Distinguish two cases:
+        //   - cargo exited non-zero → the test harness almost certainly failed
+        //     to compile; surface the actual compiler output instead of a
+        //     misleading "is cargo on PATH?" hint.
+        //   - cargo exited zero (or unknown) with no tests → genuinely nothing ran.
+        let detail = match run.exit_code {
+            Some(code) if code != 0 => format!(
+                "test harness did not run (cargo exited with code {code}) — likely a compile \
+                 error in `tests/ludwig_<slug>.rs`:\n{}",
+                compiler_error_excerpt(&run.raw)
+            ),
+            _ => "no tests reported — check that `cargo` is on PATH and \
+                  `tests/ludwig_<slug>.rs` builds"
+                .to_string(),
+        };
         out.push(Check::new(
             "deterministic",
             "test-runner",
             "fail",
-            Some(
-                "no tests reported — check that `cargo` is on PATH and `tests/ludwig_<slug>.rs` builds".into(),
-            ),
+            Some(detail),
         ));
     }
     // Property invariants are parsed but not yet machine-verified. For an active
@@ -587,4 +656,69 @@ Default to \"fail\" if you are uncertain.",
 
 fn truncate(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::RunResult;
+
+    const MINIMAL_SPEC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/specs/valid/minimal.spec.md"
+    ));
+
+    fn empty_run(exit_code: Option<i32>, raw: &str) -> RunResult {
+        RunResult {
+            tests: Vec::new(),
+            pass: 0,
+            fail: 0,
+            skip: 0,
+            exit_code,
+            raw: raw.to_string(),
+        }
+    }
+
+    ///a non-zero cargo exit with no parsed tests is reported as a
+    /// compile failure that surfaces the actual rustc output, not the misleading
+    /// "is cargo on PATH?" hint.
+    #[test]
+    fn empty_tests_with_nonzero_exit_surfaces_compiler_output() {
+        let doc = crate::parser::parse(MINIMAL_SPEC).unwrap();
+        let raw = "error[E0425]: cannot find value `foo`\n --> tests/ludwig_hello.rs:3:5\n";
+        let checks = deterministic_checks(&doc, &empty_run(Some(101), raw));
+        let runner = checks
+            .iter()
+            .find(|c| c.name == "test-runner")
+            .expect("runner check");
+        let detail = runner.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("cargo exited with code 101"),
+            "got: {detail}"
+        );
+        assert!(
+            detail.contains("E0425"),
+            "should include the compiler error: {detail}"
+        );
+    }
+
+    /// zero exit with no tests keeps the generic "nothing ran" hint.
+    #[test]
+    fn empty_tests_with_zero_exit_uses_generic_hint() {
+        let doc = crate::parser::parse(MINIMAL_SPEC).unwrap();
+        let checks = deterministic_checks(&doc, &empty_run(Some(0), ""));
+        let runner = checks
+            .iter()
+            .find(|c| c.name == "test-runner")
+            .expect("runner check");
+        let detail = runner.detail.as_deref().unwrap_or("");
+        assert!(detail.contains("cargo` is on PATH"), "got: {detail}");
+    }
+
+    #[test]
+    fn excerpt_falls_back_to_tail_when_no_error_lines() {
+        let raw = "compiling\nlinking\nsomething odd happened\n";
+        let excerpt = compiler_error_excerpt(raw);
+        assert!(excerpt.contains("something odd happened"));
+    }
 }

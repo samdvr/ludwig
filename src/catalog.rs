@@ -84,7 +84,7 @@ pub fn write(project: &Project) -> Result<PathBuf, ProjectError> {
     fs::create_dir_all(&specs_dir)
         .map_err(|e| ProjectError::new(format!("mkdir {}: {e}", specs_dir.display())))?;
     let target = specs_dir.join("_index.md");
-    fs::write(&target, content)
+    crate::util::atomic_write(&target, content.as_bytes())
         .map_err(|e| ProjectError::new(format!("write {}: {e}", target.display())))?;
     Ok(target)
 }

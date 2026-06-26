@@ -48,7 +48,11 @@ fn tools_list_includes_core_tools() {
     let names: Vec<String> = resp
         .pointer("/result/tools")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(|t| t.get("name")?.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name")?.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     for expected in &[
         "spec.list",
@@ -60,7 +64,10 @@ fn tools_list_includes_core_tools() {
         "project.decompose",
         "game.create",
     ] {
-        assert!(names.iter().any(|n| n == expected), "missing tool: {expected}");
+        assert!(
+            names.iter().any(|n| n == expected),
+            "missing tool: {expected}"
+        );
     }
 }
 
@@ -73,7 +80,10 @@ fn spec_list_returns_known_spec() {
         "tools/call",
         json!({ "name": "spec.list", "arguments": {} }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     let ids: Vec<String> = parsed
         .as_array()
@@ -110,7 +120,10 @@ fn resources_read_returns_markdown() {
         "resources/read",
         json!({ "uri": "ludwig://spec/hello-greeter" }),
     );
-    let text = resp.pointer("/result/contents/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/contents/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     assert!(text.contains("## Intent"));
 }
 
@@ -141,7 +154,10 @@ fn resources_read_rejects_parent_traversal() {
         !leaked.contains("TOP-SECRET"),
         "traversal leaked an out-of-root file: {leaked:?}"
     );
-    assert!(resp.pointer("/error").is_some(), "expected an error response");
+    assert!(
+        resp.pointer("/error").is_some(),
+        "expected an error response"
+    );
 }
 
 /// Example "absolute path is rejected": a double-slash URI that decodes to an
@@ -159,7 +175,10 @@ fn resources_read_rejects_absolute_path() {
         resp.pointer("/result/contents/0/text").is_none(),
         "absolute-path URI must not return file contents"
     );
-    assert!(resp.pointer("/error").is_some(), "expected an error response");
+    assert!(
+        resp.pointer("/error").is_some(),
+        "expected an error response"
+    );
 }
 
 /// {#b2}: the same confinement applies to the spec.read tool, which also takes
@@ -167,7 +186,11 @@ fn resources_read_rejects_absolute_path() {
 #[test]
 fn spec_read_rejects_traversal_id() {
     let (dir, project) = make_project_with_minimal_spec();
-    let secret = dir.path().parent().unwrap().join("ludwig_secret_probe2.txt");
+    let secret = dir
+        .path()
+        .parent()
+        .unwrap()
+        .join("ludwig_secret_probe2.txt");
     std::fs::write(&secret, "TOP-SECRET-CONTENTS").unwrap();
     let server = ludwig::mcp::Server::new(Some(project), None);
     let id = format!("../{}", secret.file_name().unwrap().to_str().unwrap());
@@ -228,7 +251,10 @@ fn spec_propose_returns_prompt() {
             }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     assert!(text.contains("url-shortener"));
     assert!(text.contains("Map long URLs"));
     assert!(text.contains("spec.write"));
@@ -246,7 +272,10 @@ fn project_decompose_returns_prompt() {
             "arguments": { "description": "A URL shortener with per-tenant analytics." }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     assert!(text.contains("per-tenant analytics"));
     assert!(text.contains("\"games\""));
     assert!(text.contains("\"specs\""));
@@ -292,7 +321,10 @@ Then it works
             "arguments": { "slug": "from-agent", "content": content }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let payload: Value = serde_json::from_str(text).unwrap();
     assert_eq!(payload.get("ok"), Some(&Value::Bool(true)));
     assert!(project.specs_dir().join("from-agent.spec.md").is_file());
@@ -311,7 +343,10 @@ fn spec_write_rejects_invalid_and_does_not_persist() {
             "arguments": { "slug": "from-agent", "content": bad }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let payload: Value = serde_json::from_str(text).unwrap();
     assert_eq!(payload.get("ok"), Some(&Value::Bool(false)));
     assert!(!project.specs_dir().join("from-agent.spec.md").is_file());
@@ -333,7 +368,10 @@ fn game_create_writes_manifest() {
             }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let payload: Value = serde_json::from_str(text).unwrap();
     assert_eq!(payload.get("ok"), Some(&Value::Bool(true)));
     let manifest = project.specs_dir().join("billing").join("_game.md");
@@ -354,11 +392,23 @@ fn spec_diff_returns_drift_report() {
             "arguments": { "id": "hello-greeter" }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed.pointer("/id"), Some(&Value::String("hello-greeter".to_string())));
+    assert_eq!(
+        parsed.pointer("/id"),
+        Some(&Value::String("hello-greeter".to_string()))
+    );
     // No implements: declared — files array is empty.
-    assert!(parsed.pointer("/files").and_then(Value::as_array).unwrap().is_empty());
+    assert!(
+        parsed
+            .pointer("/files")
+            .and_then(Value::as_array)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -373,10 +423,19 @@ fn spec_move_relocates_between_games() {
             "arguments": { "slug": "hello-greeter", "to_game": "auth" }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed.get("ok"), Some(&Value::Bool(true)));
-    assert!(project.specs_dir().join("auth").join("hello-greeter.spec.md").is_file());
+    assert!(
+        project
+            .specs_dir()
+            .join("auth")
+            .join("hello-greeter.spec.md")
+            .is_file()
+    );
     assert!(!project.specs_dir().join("hello-greeter.spec.md").is_file());
 }
 
@@ -400,13 +459,19 @@ fn spec_ingest_judgments_persists_verdicts() {
             }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed.get("ok"), Some(&Value::Bool(true)));
     assert_eq!(parsed.get("ingested"), Some(&Value::from(1)));
 
     let state = project.load_state().unwrap();
-    let v = state.judgments.get("hello-greeter::judgment::1").expect("verdict persisted");
+    let v = state
+        .judgments
+        .get("hello-greeter::judgment::1")
+        .expect("verdict persisted");
     assert_eq!(v.verdict, "pass");
     assert_eq!(v.spec_hash.as_deref(), Some("deadbeef"));
 }
@@ -427,7 +492,10 @@ fn spec_list_error_entry_uses_relative_path() {
         "tools/call",
         json!({ "name": "spec.list", "arguments": {} }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     let err_entry = parsed
         .as_array()
@@ -436,7 +504,10 @@ fn spec_list_error_entry_uses_relative_path() {
         .find(|e| e.get("error").is_some())
         .expect("an error entry for the broken spec");
     let path = err_entry.get("path").and_then(Value::as_str).unwrap();
-    assert_eq!(path, "specs/broken.spec.md", "expected a root-relative path, got {path:?}");
+    assert_eq!(
+        path, "specs/broken.spec.md",
+        "expected a root-relative path, got {path:?}"
+    );
 }
 
 /// initialize must echo a protocol version the client requested when the server
@@ -447,16 +518,27 @@ fn initialize_echoes_supported_protocol_version() {
     let server = ludwig::mcp::Server::new(Some(project), None);
 
     let supported = ludwig::mcp::PROTOCOL_VERSION;
-    let resp = call(&server, "initialize", json!({ "protocolVersion": supported }));
+    let resp = call(
+        &server,
+        "initialize",
+        json!({ "protocolVersion": supported }),
+    );
     assert_eq!(
-        resp.pointer("/result/protocolVersion").and_then(Value::as_str),
+        resp.pointer("/result/protocolVersion")
+            .and_then(Value::as_str),
         Some(supported),
         "server should echo a supported version the client asked for"
     );
 
-    let resp2 = call(&server, "initialize", json!({ "protocolVersion": "1999-01-01" }));
+    let resp2 = call(
+        &server,
+        "initialize",
+        json!({ "protocolVersion": "1999-01-01" }),
+    );
     assert_eq!(
-        resp2.pointer("/result/protocolVersion").and_then(Value::as_str),
+        resp2
+            .pointer("/result/protocolVersion")
+            .and_then(Value::as_str),
         Some(supported),
         "for an unsupported request the server returns its own version"
     );
@@ -511,17 +593,308 @@ Then it works
             }
         }),
     );
-    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed.get("ok"), Some(&Value::Bool(true)));
     let unknown: Vec<String> = parsed
         .get("unknown")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     assert_eq!(unknown, vec!["judged::judgment::99".to_string()]);
     // Both are still persisted.
     let state = project.load_state().unwrap();
     assert!(state.judgments.contains_key("judged::judgment::1"));
     assert!(state.judgments.contains_key("judged::judgment::99"));
+}
+
+// -- path traversal -----------------------------------------------
+
+#[test]
+fn spec_write_rejects_traversal_game() {
+    let (dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project.clone()), None);
+    let content = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/specs/valid/minimal.spec.md"
+    ))
+    .unwrap();
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.write",
+            // The slug matches the fixture id; the malicious payload is `game`.
+            "arguments": { "slug": "hello-greeter", "content": content, "game": "../../escape" }
+        }),
+    );
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload.get("ok"), Some(&Value::Bool(false)));
+    // Nothing was written outside the specs directory.
+    assert!(
+        !dir.path()
+            .parent()
+            .unwrap()
+            .join("escape")
+            .join("hello-greeter.spec.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn spec_move_rejects_traversal_to_game() {
+    let (dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project.clone()), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.move",
+            "arguments": { "slug": "hello-greeter", "to_game": "../../escape" }
+        }),
+    );
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload.get("ok"), Some(&Value::Bool(false)));
+    // Source spec is untouched and nothing escaped the project root.
+    assert!(project.specs_dir().join("minimal.spec.md").is_file());
+    assert!(
+        !dir.path()
+            .parent()
+            .unwrap()
+            .join("escape")
+            .join("hello-greeter.spec.md")
+            .is_file()
+    );
+}
+
+// -- JSON-RPC framing  ---------------------------------------------
+
+#[test]
+fn missing_method_is_invalid_request_not_parse_error() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    // Structurally valid JSON, but no `method` member.
+    let resp = server
+        .handle_line(r#"{"jsonrpc":"2.0","id":7}"#)
+        .expect("response");
+    let value = serde_json::to_value(&resp).unwrap();
+    assert_eq!(value.pointer("/error/code"), Some(&Value::from(-32600)));
+    // The request id is echoed back, per JSON-RPC 2.0.
+    assert_eq!(value.pointer("/id"), Some(&Value::from(7)));
+}
+
+#[test]
+fn non_object_message_is_invalid_request() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = server.handle_line("42").expect("response");
+    let value = serde_json::to_value(&resp).unwrap();
+    assert_eq!(value.pointer("/error/code"), Some(&Value::from(-32600)));
+}
+
+#[test]
+fn explicit_null_id_request_gets_a_response() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    // `id: null` is present, so a response is required (not a notification).
+    let resp = server
+        .handle_line(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#)
+        .expect("a request with explicit null id must be answered");
+    let value = serde_json::to_value(&resp).unwrap();
+    assert!(value.pointer("/result").is_some());
+}
+
+#[test]
+fn notification_without_id_gets_no_response() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    // No `id` member at all → a notification → no response.
+    assert!(
+        server
+            .handle_line(r#"{"jsonrpc":"2.0","method":"ping"}"#)
+            .is_none()
+    );
+}
+
+// -- tools/call error contract  ------------------------------------
+
+#[test]
+fn tool_call_success_is_not_flagged_as_error() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.list", "arguments": {} }),
+    );
+    assert_eq!(resp.pointer("/result/isError"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn tool_execution_failure_surfaces_as_is_error_result() {
+    // A Server pointed at a directory that is not a Ludwig project: the tool
+    // runs but fails (no project). That is an execution failure, so it must come
+    // back as a tool result with isError:true — not a JSON-RPC transport error.
+    let dir = TempDir::new("ludwig-not-a-project");
+    let server = ludwig::mcp::Server::new(None, Some(dir.path().to_path_buf()));
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.list", "arguments": {} }),
+    );
+    assert!(
+        resp.pointer("/error").is_none(),
+        "must not be a JSON-RPC error"
+    );
+    assert_eq!(resp.pointer("/result/isError"), Some(&Value::Bool(true)));
+}
+
+#[test]
+fn malformed_tool_params_stay_json_rpc_errors() {
+    // Missing required `id` argument is a params problem (-32602) and should
+    // remain a protocol-level JSON-RPC error, not an isError tool result.
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.read", "arguments": {} }),
+    );
+    assert_eq!(resp.pointer("/error/code"), Some(&Value::from(-32602)));
+}
+
+// -- exec lockdown (--no-exec) -----------------------------------------------
+// `spec.verify` shells out to `cargo test` (arbitrary code execution). When the
+// server is started locked down it must vanish from tools/list and be refused.
+
+#[test]
+fn no_exec_hides_verify_from_tools_list() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None).with_exec(false);
+    let resp = call(&server, "tools/list", json!({}));
+    let names: Vec<String> = resp
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name")?.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !names.iter().any(|n| n == "spec.verify"),
+        "spec.verify must be hidden under --no-exec, got {names:?}"
+    );
+    // Read-only tools stay available.
+    assert!(names.iter().any(|n| n == "spec.list"));
+    assert!(names.iter().any(|n| n == "spec.plan"));
+}
+
+#[test]
+fn no_exec_refuses_verify_call() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None).with_exec(false);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.verify", "arguments": { "id": "hello-greeter" } }),
+    );
+    assert_eq!(
+        resp.pointer("/error/code"),
+        Some(&Value::from(-32602)),
+        "locked-down spec.verify must be refused as invalid params"
+    );
+}
+
+#[test]
+fn default_server_still_advertises_verify() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(&server, "tools/list", json!({}));
+    let names: Vec<String> = resp
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name")?.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(names.iter().any(|n| n == "spec.verify"));
+}
+
+// -- implements: path confinement --------------------------------------------
+// `implements:` globs are spec-controlled and a spec can be written via the
+// untrusted spec.write tool. A pattern that escapes the project tree must be
+// rejected at write time so verify/drift can never read outside the project.
+
+#[test]
+fn spec_write_rejects_escaping_implements() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let content = "---\n\
+id: escaper\n\
+title: Escaper\n\
+status: draft\n\
+owners: []\n\
+implements:\n\
+  - ../../../../etc/passwd\n\
+depends_on: []\n\
+version: 1\n\
+---\n\
+\n\
+## Intent\n\
+A spec that tries to declare an implements path escaping the project root, \
+which the validator must reject before it is ever persisted to disk anywhere.\n\
+\n\
+## Behavior\n\
+- {#b1} does a thing\n\
+\n\
+## Examples\n\
+```example name=\"happy\"\n\
+Given a thing\n\
+When it runs\n\
+Then it works\n\
+```\n\
+\n\
+## Invariants\n\
+- {deterministic} something holds.\n";
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.write", "arguments": { "slug": "escaper", "content": content } }),
+    );
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let parsed: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    assert_eq!(
+        parsed.get("ok"),
+        Some(&Value::Bool(false)),
+        "escaping implements must be rejected: {text}"
+    );
+    // And nothing was written.
+    assert!(
+        ludwig::project::Project::open(_dir.path())
+            .unwrap()
+            .find_spec_by_id("escaper")
+            .is_none(),
+        "rejected spec must not be persisted"
+    );
 }

@@ -100,7 +100,10 @@ pub fn init(root: &Path) -> Result<Vec<PathBuf>, ProjectError> {
 pub fn new_spec(project: &Project, slug: &str, game: Option<&str>) -> Result<PathBuf, ProjectError> {
     validate_slug(slug)?;
     let dir = match game {
-        Some(g) => project.specs_dir().join(g),
+        Some(g) => {
+            validate_slug(g)?;
+            project.specs_dir().join(g)
+        }
         None => project.specs_dir(),
     };
     fs::create_dir_all(&dir)
@@ -110,15 +113,13 @@ pub fn new_spec(project: &Project, slug: &str, game: Option<&str>) -> Result<Pat
         .and_then(|n| n.to_str())
         .unwrap_or(slug);
     let target = dir.join(format!("{basename}.spec.md"));
-    if target.is_file() {
-        return Err(ProjectError::new(format!(
-            "spec already exists: {}",
-            target.display()
-        )));
+    match crate::util::write_guarded(&target, spec_template(slug).as_bytes(), false) {
+        Ok(()) => Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(ProjectError::new(
+            format!("spec already exists: {}", target.display()),
+        )),
+        Err(e) => Err(ProjectError::new(format!("write {}: {e}", target.display()))),
     }
-    fs::write(&target, spec_template(slug))
-        .map_err(|e| ProjectError::new(format!("write {}: {e}", target.display())))?;
-    Ok(target)
 }
 
 pub fn spec_template(slug: &str) -> String {
@@ -181,7 +182,10 @@ pub fn write_spec(
     }
 
     let dir = match game {
-        Some(g) => project.specs_dir().join(g),
+        Some(g) => {
+            validate_slug(g).map_err(WriteSpecError::Project)?;
+            project.specs_dir().join(g)
+        }
         None => project.specs_dir(),
     };
     fs::create_dir_all(&dir)
@@ -192,16 +196,20 @@ pub fn write_spec(
         .and_then(|n| n.to_str())
         .unwrap_or(slug);
     let target = dir.join(format!("{basename}.spec.md"));
-    if target.is_file() && !force {
-        let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
-        return Err(WriteSpecError::Project(ProjectError::new(format!(
-            "spec already exists at {}; pass force: true to overwrite",
-            rel.display()
-        ))));
+    match crate::util::write_guarded(&target, content.as_bytes(), force) {
+        Ok(()) => Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
+            Err(WriteSpecError::Project(ProjectError::new(format!(
+                "spec already exists at {}; pass force: true to overwrite",
+                rel.display()
+            ))))
+        }
+        Err(e) => Err(WriteSpecError::Project(ProjectError::new(format!(
+            "write {}: {e}",
+            target.display()
+        )))),
     }
-    fs::write(&target, content)
-        .map_err(|e| WriteSpecError::Project(ProjectError::new(format!("write {}: {e}", target.display()))))?;
-    Ok(target)
 }
 
 pub fn create_game(
@@ -216,16 +224,21 @@ pub fn create_game(
     fs::create_dir_all(&dir)
         .map_err(|e| ProjectError::new(format!("mkdir {}: {e}", dir.display())))?;
     let target = dir.join(Game::MANIFEST_FILE);
-    if target.is_file() && !force {
-        let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
-        return Err(ProjectError::new(format!(
-            "game manifest already exists at {}",
-            rel.display()
-        )));
+    match crate::util::write_guarded(
+        &target,
+        render_game_manifest(name, intent, glossary).as_bytes(),
+        force,
+    ) {
+        Ok(()) => Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
+            Err(ProjectError::new(format!(
+                "game manifest already exists at {}",
+                rel.display()
+            )))
+        }
+        Err(e) => Err(ProjectError::new(format!("write {}: {e}", target.display()))),
     }
-    fs::write(&target, render_game_manifest(name, intent, glossary))
-        .map_err(|e| ProjectError::new(format!("write {}: {e}", target.display())))?;
-    Ok(target)
 }
 
 pub fn render_game_manifest(name: &str, intent: Option<&str>, glossary: &[(String, String)]) -> String {
@@ -285,7 +298,10 @@ pub fn move_spec(
     }
 
     let dest_dir = match to_game {
-        Some(g) => project.specs_dir().join(g),
+        Some(g) => {
+            validate_slug(g)?;
+            project.specs_dir().join(g)
+        }
         None => project.specs_dir(),
     };
     fs::create_dir_all(&dest_dir)
@@ -299,16 +315,19 @@ pub fn move_spec(
     if source == target {
         return Ok(target);
     }
-    if target.is_file() && !force {
-        let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
-        return Err(ProjectError::new(format!(
-            "destination already exists at {}; pass force: true to overwrite",
-            rel.display()
-        )));
+    match crate::util::write_guarded(&target, content.as_bytes(), force) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let rel = target.strip_prefix(&project.root).unwrap_or(&target).to_path_buf();
+            return Err(ProjectError::new(format!(
+                "destination already exists at {}; pass force: true to overwrite",
+                rel.display()
+            )));
+        }
+        Err(e) => {
+            return Err(ProjectError::new(format!("write {}: {e}", target.display())));
+        }
     }
-
-    fs::write(&target, &content)
-        .map_err(|e| ProjectError::new(format!("write {}: {e}", target.display())))?;
     fs::remove_file(&source)
         .map_err(|e| ProjectError::new(format!("remove {}: {e}", source.display())))?;
 

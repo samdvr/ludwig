@@ -15,14 +15,17 @@ pub struct RustAdapter {
 }
 
 impl RustAdapter {
-    pub fn new(project: Project) -> Self { Self { project } }
+    pub fn new(project: Project) -> Self {
+        Self { project }
+    }
 
     pub fn tests_dir(&self) -> PathBuf {
         self.project.root.join("tests")
     }
 
     pub fn test_file_for(&self, id: &str) -> PathBuf {
-        self.tests_dir().join(format!("ludwig_{}.rs", file_slug(id)))
+        self.tests_dir()
+            .join(format!("ludwig_{}.rs", file_slug(id)))
     }
 }
 
@@ -50,7 +53,10 @@ impl Adapter for RustAdapter {
         }
         // Return both paths; for the Rust adapter the "spec file" and "steps file" are
         // the same single file. Keep the API uniform for future adapters.
-        Ok(RenderInfo { spec_file: target.clone(), steps_file: target })
+        Ok(RenderInfo {
+            spec_file: target.clone(),
+            steps_file: target,
+        })
     }
 
     fn run(&self, doc: &Document) -> Result<RunResult, crate::Error> {
@@ -133,13 +139,26 @@ pub(crate) fn parse_output(output: &str, exit_code: Option<i32>) -> RunResult {
             results.push(TestResult { name, status });
         }
     }
-    let pass = results.iter().filter(|r| r.status == TestStatus::Pass).count() as u32;
+    let pass = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Pass)
+        .count() as u32;
     let fail = results
         .iter()
         .filter(|r| r.status == TestStatus::Fail)
         .count() as u32;
-    let skip = results.iter().filter(|r| r.status == TestStatus::Skip).count() as u32;
-    RunResult { tests: results, pass, fail, skip, exit_code, raw: output.to_string() }
+    let skip = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Skip)
+        .count() as u32;
+    RunResult {
+        tests: results,
+        pass,
+        fail,
+        skip,
+        exit_code,
+        raw: output.to_string(),
+    }
 }
 
 // -- rendering ----------------------------------------------------------------
@@ -261,7 +280,10 @@ mod tests {
     fn target_dir_nested_under_cargo_isolates() {
         let cache = std::path::Path::new("/tmp/proj/.ludwig/cache");
         let got = choose_verify_target_dir(None, true, cache).expect("should isolate");
-        assert!(got.starts_with(cache), "expected isolation under cache dir, got {got:?}");
+        assert!(
+            got.starts_with(cache),
+            "expected isolation under cache dir, got {got:?}"
+        );
     }
 
     /// {#b3} No override + no outer cargo → inherit the ambient target.
@@ -285,6 +307,20 @@ test test_deterministic_invariant_1 ... ignored
         assert_eq!(result.fail, 1);
         assert_eq!(result.skip, 1);
         assert_eq!(result.tests[0].name, "test_example_burst_then_throttle");
+    }
+
+    #[test]
+    fn parse_output_preserves_nonzero_exit_with_no_tests() {
+        // A compile failure: cargo prints rustc errors and no `test … ok` lines,
+        // and exits non-zero. parse_output must surface zero tests *and* retain
+        // the exit code so the verifier can distinguish "didn't build" from
+        // "cargo missing".
+        let raw =
+            "error[E0425]: cannot find value `foo` in this scope\n --> tests/ludwig_x.rs:3:5\n";
+        let result = parse_output(raw, Some(101));
+        assert!(result.tests.is_empty());
+        assert_eq!(result.exit_code, Some(101));
+        assert!(result.raw.contains("E0425"));
     }
 
     #[test]

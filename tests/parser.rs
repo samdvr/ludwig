@@ -399,3 +399,53 @@ This is prose, not a bullet, so the parser must reject it.
         err.message
     );
 }
+
+/// `implements:` patterns are spec-controlled and can arrive via the untrusted
+/// spec.write tool. A pattern that escapes the project tree (absolute, drive
+/// prefix, or `..`) must be rejected at validation time so verify/drift can
+/// never expand it into an out-of-project read. See spec `mcp-path-confinement`.
+#[test]
+fn rejects_implements_that_escape_project_root() {
+    let template = |impl_line: &str| {
+        format!(
+            r#"---
+id: escaper
+title: Escaper
+status: draft
+owners: []
+implements:
+  - {impl_line}
+depends_on: []
+version: 1
+---
+
+## Intent
+A spec whose implements entry tries to point outside the project root, which
+the validator must reject before any reader expands the pattern against disk.
+
+## Behavior
+- {{#b1}} does a thing
+
+## Examples
+```example name="x"
+Given a thing
+When it runs
+Then it works
+```
+
+## Invariants
+- {{deterministic}} ok
+"#
+        )
+    };
+    for bad in ["../../etc/passwd", "/etc/passwd", "src/../../secret"] {
+        let err = ludwig::parser::parse(&template(bad)).expect_err("must reject escaping implements");
+        assert!(
+            err.message.contains("implements"),
+            "expected an implements-confinement error for {bad:?}, got: {}",
+            err.message
+        );
+    }
+    // A legitimate in-tree pattern still parses.
+    ludwig::parser::parse(&template("src/lib.rs")).expect("in-tree implements must parse");
+}

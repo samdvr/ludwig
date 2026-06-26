@@ -84,22 +84,35 @@ pub struct FileFingerprint {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum RegenHint {
-    Fresh { fresh: bool },
-    Stale { fresh: bool, previous_version: u32, current_version: u32 },
+    Fresh {
+        fresh: bool,
+    },
+    Stale {
+        fresh: bool,
+        previous_version: u32,
+        current_version: u32,
+    },
 }
 
 pub fn brief_for(project: &Project, id: &str) -> Result<Brief, ProjectError> {
     let path = project
         .find_spec_path(id)
         .ok_or_else(|| ProjectError::new(format!("no spec found with id {id:?}")))?;
-    let doc = parser::parse_file(&path)
+    brief_for_path(project, &path)
+}
+
+/// Build the generation brief from an already-resolved spec path. The MCP layer
+/// calls this with the path returned by its confinement check so a single
+/// `spec.plan` request does not re-scan and re-parse every spec twice.
+pub fn brief_for_path(project: &Project, path: &std::path::Path) -> Result<Brief, ProjectError> {
+    let doc = parser::parse_file(path)
         .map_err(|e| ProjectError::new(format!("{}: {}", path.display(), e.message)))?;
-    let game = Game::for_spec(project, &path);
+    let game = Game::for_spec(project, path);
     let deps = resolve_dependencies(project, &doc.frontmatter.depends_on);
 
     let rel_path = path
         .strip_prefix(&project.root)
-        .unwrap_or(&path)
+        .unwrap_or(path)
         .to_string_lossy()
         .into_owned();
 
@@ -114,7 +127,10 @@ pub fn brief_for(project: &Project, id: &str) -> Result<Brief, ProjectError> {
         behaviors: doc
             .behaviors
             .iter()
-            .map(|b| BriefBehavior { tag: b.tag.clone(), text: b.text.clone() })
+            .map(|b| BriefBehavior {
+                tag: b.tag.clone(),
+                text: b.text.clone(),
+            })
             .collect(),
         examples: doc
             .examples
@@ -124,14 +140,20 @@ pub fn brief_for(project: &Project, id: &str) -> Result<Brief, ProjectError> {
                 steps: e
                     .steps
                     .iter()
-                    .map(|s| BriefStep { keyword: s.keyword, text: s.text.clone() })
+                    .map(|s| BriefStep {
+                        keyword: s.keyword,
+                        text: s.text.clone(),
+                    })
                     .collect(),
             })
             .collect(),
         invariants: doc
             .invariants
             .iter()
-            .map(|i| BriefInvariant { classifier: i.classifier, text: i.text.clone() })
+            .map(|i| BriefInvariant {
+                classifier: i.classifier,
+                text: i.text.clone(),
+            })
             .collect(),
         non_goals: doc.non_goals.clone(),
         implementation_notes: doc.implementation_notes.clone(),
@@ -140,7 +162,13 @@ pub fn brief_for(project: &Project, id: &str) -> Result<Brief, ProjectError> {
     let implementing_files = existing_implementing_files(project, &doc.frontmatter.implements);
     let regenerating = regenerating_hint(project, doc.id(), doc.version());
 
-    Ok(Brief { spec, game, depends_on: deps, implementing_files, regenerating })
+    Ok(Brief {
+        spec,
+        game,
+        depends_on: deps,
+        implementing_files,
+        regenerating,
+    })
 }
 
 fn resolve_dependencies(project: &Project, start: &[String]) -> Vec<DependencyEntry> {
@@ -192,6 +220,15 @@ fn resolve_dependencies(project: &Project, start: &[String]) -> Vec<DependencyEn
 fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileFingerprint> {
     let mut out: Vec<FileFingerprint> = Vec::new();
     for pat in globs {
+        // `implements:` patterns are spec-controlled. Refuse any that are
+        // absolute or contain a `..` component so a malicious or careless spec
+        // can't fingerprint (and thereby leak the size/sha of) files outside the
+        // project tree. The glob branch already walks only under `root`, but the
+        // exact-path branch would otherwise read whatever `root.join(pat)`
+        // resolves to.
+        if crate::util::pattern_escapes_root(pat) {
+            continue;
+        }
         let full = project.root.join(pat);
         let pat_str = full.to_string_lossy().into_owned();
         // Use a tiny glob substitute: only match exact paths (no globbing characters)
@@ -258,6 +295,19 @@ pub(crate) fn contains_glob(pat: &str) -> bool {
     pat.contains('*') || pat.contains('?')
 }
 
+/// Directories `glob_expand` never descends into: build output, VCS internals,
+/// and Ludwig's own state dir. Matching by leaf name keeps it simple and covers
+/// the common cases; a spec's `implements:` is never expected to point inside one.
+fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    matches!(
+        entry.file_name().to_str(),
+        Some(".git" | "target" | ".ludwig" | "node_modules")
+    )
+}
+
 /// Hand-rolled glob: only supports `*` (any chars except `/`), `**` (any chars),
 /// and `?` (single char except `/`). Adequate for the patterns the spec system
 /// uses (`src/foo/*.rs`, `src/foo.*`). Bracket character classes are NOT
@@ -269,7 +319,15 @@ pub(crate) fn glob_expand(root: &std::path::Path, pattern: &str) -> Vec<PathBuf>
         Err(_) => return Vec::new(),
     };
     let mut out: Vec<PathBuf> = Vec::new();
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        // Prune build/VCS/state dirs so a `**` pattern doesn't descend into
+        // (and fingerprint) generated artifacts, git internals, or Ludwig's own
+        // bookkeeping — none of which a spec's `implements:` should match. This
+        // also keeps the walk cheap on large trees.
+        .filter_entry(|e| !is_pruned_dir(e))
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -313,4 +371,25 @@ fn glob_to_regex(pat: &str) -> String {
     }
     out.push('$');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::util::pattern_escapes_root;
+
+    // spec-controlled `implements:` patterns must not be able to
+    // reach outside the project tree.
+    #[test]
+    fn rejects_parent_and_absolute_patterns() {
+        assert!(pattern_escapes_root("../secrets.txt"));
+        assert!(pattern_escapes_root("src/../../etc/passwd"));
+        assert!(pattern_escapes_root("/etc/passwd"));
+    }
+
+    #[test]
+    fn allows_in_tree_patterns() {
+        assert!(!pattern_escapes_root("src/lib.rs"));
+        assert!(!pattern_escapes_root("src/adapters/*.rs"));
+        assert!(!pattern_escapes_root("crate/sub/mod.rs"));
+    }
 }

@@ -54,6 +54,12 @@ pub fn strip_trailing_comment(content: &str) -> String {
     // Drop any line that matches the `ludwig-spec:` stamp regardless of position.
     // The scaffold currently emits the stamp on the first line, while hand-written
     // files often place it last; both should hash the same body.
+    //
+    // Line endings are deliberately normalized to LF here (via `lines()`): a pure
+    // CRLF<->LF flip (e.g. a checkout under git `core.autocrlf`) is not a semantic
+    // change to the implementation and must not register as `BodyChanged`. Both
+    // the stored and the current fingerprint pass through this function, so the
+    // comparison stays self-consistent.
     let kept: Vec<&str> =
         content.lines().filter(|line| !TRAILING_COMMENT_RE.is_match(line)).collect();
     let mut out = kept.join("\n");
@@ -130,7 +136,14 @@ pub fn report(project: &Project, id_or_path: &str) -> Result<DriftReport, Projec
     let path = project
         .find_spec_path(id_or_path)
         .ok_or_else(|| ProjectError::new(format!("no spec found with id-or-path {id_or_path:?}")))?;
-    let doc = parser::parse_file(&path)
+    report_for_path(project, &path)
+}
+
+/// Build the drift report from an already-resolved spec path. The MCP layer
+/// calls this with the path returned by its confinement check so a single
+/// `spec.diff` request does not re-scan and re-parse every spec twice.
+pub fn report_for_path(project: &Project, path: &Path) -> Result<DriftReport, ProjectError> {
+    let doc = parser::parse_file(path)
         .map_err(|e| ProjectError::new(format!("{}: {}", path.display(), e.message)))?;
     let state = project.load_state().unwrap_or_default();
     let entry = state.specs.get(doc.id()).cloned();

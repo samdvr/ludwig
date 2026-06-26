@@ -59,6 +59,11 @@ enum Cmd {
         /// `latest.md` is still written under `.ludwig/reports/`.
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Treat pending judgments as failures for the exit code. Without this an
+        /// unverified `{judgment}` invariant exits 0; with it, any pending verdict
+        /// makes the run exit non-zero so CI can't green-light unjudged specs.
+        #[arg(long, default_value_t = false)]
+        strict: bool,
     },
 
     /// Show drift between specs and code.
@@ -75,6 +80,11 @@ enum Cmd {
     Mcp {
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Disable code-executing tools (`spec.verify` runs `cargo test`).
+        /// Use when exposing the server to an untrusted client; the read-only
+        /// spec tools stay available.
+        #[arg(long = "no-exec", default_value_t = false)]
+        no_exec: bool,
     },
 
     /// Emit a prompt that decomposes a project description into specs.
@@ -211,7 +221,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             println!("{}", serde_json::to_string_pretty(&brief)?);
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Verify { id, all, emit_judgment_prompts, ingest_judgments, json } => {
+        Cmd::Verify { id, all, emit_judgment_prompts, ingest_judgments, json, strict } => {
             let project = Project::discover(std::env::current_dir()?)?;
             let v = verify::Verify::new(&project);
             if let Some(path) = ingest_judgments {
@@ -270,7 +280,20 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     total_skip,
                 );
             }
-            Ok(if specs_failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+            // `--strict` promotes pending judgments to a non-zero exit so an
+            // unverified spec can't pass CI. `emit_judgment_prompts` is a
+            // prompt-dump mode that never runs checks, so it's exempt.
+            let strict_fail = strict && !emit_judgment_prompts && total_pending > 0;
+            if strict_fail && !json {
+                eprintln!(
+                    "strict: {total_pending} judgment(s) still pending — ingest verdicts before this passes."
+                );
+            }
+            Ok(if specs_failed > 0 || strict_fail {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
         }
         Cmd::Diff { id, all, json } => {
             let project = Project::discover(std::env::current_dir()?)?;
@@ -289,8 +312,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Mcp { root } => {
-            mcp::Server::new(None, root).run()?;
+        Cmd::Mcp { root, no_exec } => {
+            mcp::Server::new(None, root).with_exec(!no_exec).run()?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Decompose { description } => {
