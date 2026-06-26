@@ -17,7 +17,9 @@ path = "src/lib.rs"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+# serde_yaml 0.9 is unmaintained/deprecated; serde_yaml_ng is the maintained
+# API-compatible fork. Renamed to `serde_yaml` so call sites stay unchanged.
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2 = "0.10"
 regex = "1"
 walkdir = "2"

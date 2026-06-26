@@ -151,16 +151,10 @@ Then it returns 6
     )
     .unwrap();
 
-    // Isolate the nested cargo build so it doesn't fight the parent target lock.
-    let target_dir = TempDir::new("ludwig-cargo-target");
-    // SAFETY: tests are single-threaded for this env (cargo test runs each
-    // integration test binary in parallel but with separate processes).
-    unsafe {
-        std::env::set_var(
-            "LUDWIG_NESTED_CARGO_TARGET_DIR",
-            target_dir.path().display().to_string(),
-        );
-    }
+    // No env override needed: running under `cargo test` sets CARGO, so the
+    // adapter auto-isolates the nested build to this project's own
+    // .ludwig/cache/verify-target (see spec `verify-isolates-nested-cargo`).
+    // This avoids the previous global-env race between the e2e tests.
 
     let v = ludwig::verify::Verify::new(&project);
     let report = v.run("doubler", Default::default()).unwrap();
@@ -292,14 +286,8 @@ Then it returns 7
     )
     .unwrap();
 
-    let target_dir = TempDir::new("ludwig-cargo-target");
-    // SAFETY: nested cargo target is process-isolated; this env var only steers it.
-    unsafe {
-        std::env::set_var(
-            "LUDWIG_NESTED_CARGO_TARGET_DIR",
-            target_dir.path().display().to_string(),
-        );
-    }
+
+    // Auto-isolated nested target (see spec `verify-isolates-nested-cargo`).
 
     let v = ludwig::verify::Verify::new(&project);
     let report = v.run("prop-only", Default::default()).unwrap();
@@ -461,14 +449,8 @@ Then it returns 8
     )
     .unwrap();
 
-    let target_dir = TempDir::new("ludwig-cargo-target");
-    // SAFETY: nested cargo target is process-isolated.
-    unsafe {
-        std::env::set_var(
-            "LUDWIG_NESTED_CARGO_TARGET_DIR",
-            target_dir.path().display().to_string(),
-        );
-    }
+
+    // Auto-isolated nested target (see spec `verify-isolates-nested-cargo`).
 
     let v = ludwig::verify::Verify::new(&project);
     let report = v.run("two-examples", Default::default()).unwrap();

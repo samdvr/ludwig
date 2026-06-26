@@ -23,7 +23,6 @@ pub struct TestResult {
 pub enum TestStatus {
     Pass,
     Fail,
-    Error,
     Skip,
 }
 
@@ -32,7 +31,6 @@ impl TestStatus {
         match self {
             Self::Pass => "pass",
             Self::Fail => "fail",
-            Self::Error => "error",
             Self::Skip => "skip",
         }
     }

@@ -64,9 +64,16 @@ impl Adapter for RustAdapter {
             .arg("--test-threads=1")
             .current_dir(&self.project.root);
 
-        // Honour an override for the target directory so nested invocations don't
-        // contend on the parent build's target lock.
-        if let Ok(td) = std::env::var("LUDWIG_NESTED_CARGO_TARGET_DIR") {
+        // Run the nested build against an isolated target dir when we're nested
+        // under an outer cargo invocation, so we don't deadlock on its `target/`
+        // lock. A plain top-level run inherits the ambient target and keeps its
+        // build cache. See spec `verify-isolates-nested-cargo`.
+        if let Some(td) = choose_verify_target_dir(
+            std::env::var("LUDWIG_NESTED_CARGO_TARGET_DIR").ok(),
+            std::env::var_os("CARGO").is_some(),
+            &self.project.cache_dir(),
+        ) {
+            let _ = fs::create_dir_all(&td);
             cmd.env("CARGO_TARGET_DIR", td);
         }
 
@@ -78,6 +85,28 @@ impl Adapter for RustAdapter {
         let combined = format!("{stdout}\n{stderr}");
         Ok(parse_output(&combined, output.status.code()))
     }
+}
+
+// -- nested-cargo target isolation -------------------------------------------
+
+/// Decide the `CARGO_TARGET_DIR` for the nested `cargo test` run, or `None` to
+/// inherit the ambient one. See spec `verify-isolates-nested-cargo`:
+/// an explicit override always wins; otherwise we isolate only when we detect
+/// we're running under an outer cargo invocation (cargo sets `CARGO` for the
+/// processes it spawns), so a plain top-level `ludwig verify` keeps sharing the
+/// user's build cache.
+pub(crate) fn choose_verify_target_dir(
+    explicit_override: Option<String>,
+    outer_cargo: bool,
+    cache_dir: &std::path::Path,
+) -> Option<PathBuf> {
+    if let Some(o) = explicit_override {
+        return Some(PathBuf::from(o));
+    }
+    if outer_cargo {
+        return Some(cache_dir.join("verify-target"));
+    }
+    None
 }
 
 // -- output parsing -----------------------------------------------------------
@@ -107,7 +136,7 @@ pub(crate) fn parse_output(output: &str, exit_code: Option<i32>) -> RunResult {
     let pass = results.iter().filter(|r| r.status == TestStatus::Pass).count() as u32;
     let fail = results
         .iter()
-        .filter(|r| matches!(r.status, TestStatus::Fail | TestStatus::Error))
+        .filter(|r| r.status == TestStatus::Fail)
         .count() as u32;
     let skip = results.iter().filter(|r| r.status == TestStatus::Skip).count() as u32;
     RunResult { tests: results, pass, fail, skip, exit_code, raw: output.to_string() }
@@ -210,6 +239,37 @@ fn escape_rust_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- spec: verify-isolates-nested-cargo ----------------------------------
+
+    /// {#b1} An explicit override wins regardless of outer-cargo detection.
+    #[test]
+    fn target_dir_explicit_override_wins() {
+        let cache = std::path::Path::new("/tmp/cache");
+        assert_eq!(
+            choose_verify_target_dir(Some("/x/override".to_string()), true, cache),
+            Some(PathBuf::from("/x/override"))
+        );
+        assert_eq!(
+            choose_verify_target_dir(Some("/x/override".to_string()), false, cache),
+            Some(PathBuf::from("/x/override"))
+        );
+    }
+
+    /// {#b2} No override + detected outer cargo → isolate under the cache dir.
+    #[test]
+    fn target_dir_nested_under_cargo_isolates() {
+        let cache = std::path::Path::new("/tmp/proj/.ludwig/cache");
+        let got = choose_verify_target_dir(None, true, cache).expect("should isolate");
+        assert!(got.starts_with(cache), "expected isolation under cache dir, got {got:?}");
+    }
+
+    /// {#b3} No override + no outer cargo → inherit the ambient target.
+    #[test]
+    fn target_dir_top_level_inherits() {
+        let cache = std::path::Path::new("/tmp/proj/.ludwig/cache");
+        assert_eq!(choose_verify_target_dir(None, false, cache), None);
+    }
 
     #[test]
     fn parses_cargo_test_output() {

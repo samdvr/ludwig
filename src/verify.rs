@@ -406,12 +406,12 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
             .to_string();
         let status = match t.status {
             TestStatus::Pass => "pass",
-            TestStatus::Fail | TestStatus::Error => "fail",
+            TestStatus::Fail => "fail",
             TestStatus::Skip => "skip",
         };
         let detail = match t.status {
             TestStatus::Skip => Some("test ignored — fill in the `todo!()` body".into()),
-            TestStatus::Fail | TestStatus::Error => {
+            TestStatus::Fail => {
                 Some("see report `.ludwig/reports/latest.md` for details".into())
             }
             TestStatus::Pass => None,

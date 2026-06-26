@@ -14,9 +14,14 @@ use crate::spec::Document;
 
 /// `ludwig-spec: <id>@<version> hash=<sha>` — captures id, version, hash. The id
 /// pattern allows `/` so that sub-game spec ids (e.g. `auth/login`) round-trip.
+/// Anchored to the start of a line (after optional whitespace and a single
+/// comment marker) so a line that merely *mentions* the stamp text inside a
+/// string or code is not mistaken for a stamp.
 pub static TRAILING_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"ludwig-spec:\s+(?P<id>[\w\-/]+)@(?P<version>\d+)\s+hash=(?P<hash>[A-Fa-f0-9]+)")
-        .unwrap()
+    Regex::new(
+        r"(?m)^[ \t]*(?:#|//|/\*|\*|<!--|--|;|%)?[ \t]*ludwig-spec:\s+(?P<id>[\w\-/]+)@(?P<version>\d+)\s+hash=(?P<hash>[A-Fa-f0-9]+)",
+    )
+    .unwrap()
 });
 
 pub fn parse_trailing(content: &str) -> Option<TrailingStamp<'_>> {
@@ -340,4 +345,33 @@ fn short(h: &str) -> &str {
 /// panic.
 pub fn short_hash(h: &str) -> &str {
     h.get(..7).unwrap_or(h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A line that merely mentions the stamp text inside a string/code must not
+    /// be mistaken for a real stamp.
+    #[test]
+    fn stamp_regex_ignores_midline_literal() {
+        let content = "let s = \"ludwig-spec: fake@1 hash=deadbeef\";\n";
+        assert!(parse_trailing(content).is_none());
+        // Stripping the (non-)stamp leaves the line untouched.
+        assert_eq!(strip_trailing_comment(content), content);
+    }
+
+    /// A real stamp on its own line (with or without a leading comment marker)
+    /// is still detected, and a decoy literal alongside it is ignored.
+    #[test]
+    fn stamp_regex_matches_real_stamp_line() {
+        let content = "pub fn f() {}\n// ludwig-spec: my-spec@3 hash=abc123\n";
+        let stamp = parse_trailing(content).expect("real stamp detected");
+        assert_eq!(stamp.id, "my-spec");
+        assert_eq!(stamp.version, 3);
+        assert_eq!(stamp.hash, "abc123");
+
+        let mixed = "let s = \"ludwig-spec: fake@9 hash=dead\";\n// ludwig-spec: real@1 hash=beef\n";
+        assert_eq!(parse_trailing(mixed).expect("stamp").id, "real");
+    }
 }

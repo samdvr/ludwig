@@ -125,7 +125,12 @@ impl Project {
         out
     }
 
-    /// Look up a spec by id, or treat the argument as a path.
+    /// Look up a spec by id, or treat the argument as a path. The path fallback
+    /// is a CLI convenience (`ludwig verify path/to/x.spec.md`); it interprets
+    /// the argument against the filesystem and can therefore reach outside the
+    /// specs directory. Do NOT call this with untrusted input — the MCP server
+    /// uses [`find_spec_by_id`](Self::find_spec_by_id) instead, which cannot
+    /// escape the project.
     pub fn find_spec_path(&self, id_or_path: &str) -> Option<PathBuf> {
         let pathish = Path::new(id_or_path);
         if pathish.is_absolute() && pathish.is_file() {
@@ -135,9 +140,21 @@ impl Project {
         if rooted.is_file() {
             return Some(rooted);
         }
+        self.find_spec_by_id(id_or_path)
+    }
+
+    /// Resolve a spec strictly by its frontmatter `id`, scanning only the specs
+    /// directory. Unlike [`find_spec_path`](Self::find_spec_path) this never
+    /// interprets the argument as a filesystem path, so an `id` carrying `..`
+    /// or an absolute path cannot escape the project — it simply matches no
+    /// spec. This is the resolver the MCP server must use, because ids arrive
+    /// there directly from an untrusted client. Sub-game ids that contain `/`
+    /// (e.g. `auth/login`) still resolve, since matching is by parsed id, not
+    /// by path.
+    pub fn find_spec_by_id(&self, id: &str) -> Option<PathBuf> {
         for p in self.spec_paths() {
             if let Ok(doc) = parser::parse_file(&p)
-                && doc.id() == id_or_path
+                && doc.id() == id
             {
                 return Some(p);
             }
@@ -163,8 +180,21 @@ impl Project {
         let mut bytes = serde_json::to_vec_pretty(state)
             .map_err(|e| ProjectError::new(format!("serialize state: {e}")))?;
         bytes.push(b'\n');
-        fs::write(self.state_path(), &bytes)
-            .map_err(|e| ProjectError::new(format!("write state: {e}")))
+        // Atomic write: serialize to a sibling temp file, then rename it over the
+        // destination. A rename within the same directory is atomic on POSIX and
+        // replaces the target on Windows, so a crash or full disk mid-write can
+        // never leave a truncated state.json — a reader sees the old complete
+        // file or the new one. See spec `atomic-state-writes`.
+        let final_path = self.state_path();
+        let pid = std::process::id();
+        let tmp_path = dir.join(format!(".{STATE_FILE}.{pid}.tmp"));
+        fs::write(&tmp_path, &bytes)
+            .map_err(|e| ProjectError::new(format!("write {}: {e}", tmp_path.display())))?;
+        fs::rename(&tmp_path, &final_path).map_err(|e| {
+            // Best-effort cleanup so a failed rename doesn't strand the temp file.
+            let _ = fs::remove_file(&tmp_path);
+            ProjectError::new(format!("replace {}: {e}", final_path.display()))
+        })
     }
 
     /// List the `(id, title)` of every spec under `specs/<game>/` (or directly

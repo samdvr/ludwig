@@ -45,8 +45,4 @@ impl Document {
     pub fn judgment_invariants(&self) -> impl Iterator<Item = &Invariant> {
         self.invariants.iter().filter(|i| i.classifier == Classifier::Judgment)
     }
-
-    pub fn active_eligible(&self) -> bool {
-        self.open_questions.is_empty()
-    }
 }

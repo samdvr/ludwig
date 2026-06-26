@@ -15,6 +15,22 @@ use crate::verify::{self, IngestedVerdict, RunOptions};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Protocol versions this server can speak, newest first. On `initialize` we
+/// echo the client's requested version if it is one of these, otherwise we fall
+/// back to [`PROTOCOL_VERSION`] so the client knows which version we'll use.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
+
+/// Pick the protocol version to report from `initialize`. Echoes the client's
+/// requested version when we support it; otherwise returns our default.
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => {
+            SUPPORTED_PROTOCOL_VERSIONS.iter().find(|s| **s == v).unwrap()
+        }
+        _ => PROTOCOL_VERSION,
+    }
+}
+
 /// Canonical list of MCP tool names this server exposes. Both
 /// [`tool_descriptors`] (advertised over `tools/list`) and [`Server::call_tool`]
 /// (the dispatcher) must agree with this list — the `tools_descriptors_match_dispatch`
@@ -109,7 +125,9 @@ impl Server {
     fn dispatch(&self, method: &str, params: &Value) -> Result<Value, ErrorObject> {
         match method {
             "initialize" => Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": negotiate_protocol_version(
+                    params.get("protocolVersion").and_then(|v| v.as_str())
+                ),
                 "capabilities": { "tools": {}, "resources": {} },
                 "serverInfo": { "name": "ludwig", "version": crate::VERSION }
             })),
@@ -192,7 +210,7 @@ impl Server {
                 message: "missing uri".to_string(),
             })?;
         if let Some(id) = uri.strip_prefix("ludwig://spec/") {
-            let path = project.find_spec_path(id).ok_or_else(|| ErrorObject {
+            let path = project.find_spec_by_id(id).ok_or_else(|| ErrorObject {
                 code: -32602,
                 message: "no such spec".to_string(),
             })?;
@@ -276,10 +294,17 @@ impl Server {
                         "path": rel,
                     }));
                 }
-                Err(e) => out.push(json!({
-                    "path": path.to_string_lossy(),
-                    "error": e.message,
-                })),
+                Err(e) => {
+                    let rel = path
+                        .strip_prefix(&project.root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push(json!({
+                        "path": rel,
+                        "error": e.message,
+                    }))
+                }
             }
         }
         Ok(Value::Array(out))
@@ -288,7 +313,7 @@ impl Server {
     fn tool_spec_read(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
-        let path = project.find_spec_path(id).ok_or_else(|| ErrorObject {
+        let path = project.find_spec_by_id(id).ok_or_else(|| ErrorObject {
             code: -32602,
             message: "no such spec".to_string(),
         })?;
@@ -323,6 +348,7 @@ impl Server {
     fn tool_spec_plan(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
+        confine_spec_id(&project, id)?;
         let brief = plan::brief_for(&project, id).map_err(project_to_rpc)?;
         Ok(serde_json::to_value(&brief).unwrap_or_default())
     }
@@ -330,6 +356,7 @@ impl Server {
     fn tool_spec_verify(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
+        confine_spec_id(&project, id)?;
         let emit = args
             .get("emit_judgment_prompts")
             .and_then(|v| v.as_bool())
@@ -346,6 +373,7 @@ impl Server {
     fn tool_spec_diff(&self, args: &Value) -> Result<Value, ErrorObject> {
         let project = self.project()?;
         let id = require_string(args, "id")?;
+        confine_spec_id(&project, id)?;
         let report = drift::report(&project, id).map_err(project_to_rpc)?;
         Ok(serde_json::to_value(&report).unwrap_or_default())
     }
@@ -365,13 +393,23 @@ impl Server {
                 message: format!("verdicts must be an array of {{invariant_key, verdict, ...}}: {e}"),
             })?;
         let count = verdicts.len();
+        // Flag verdicts whose key matches no judgment invariant currently in the
+        // project. We still persist them (a later spec edit might reintroduce the
+        // key, and the file overload preserves everything), but the agent gets
+        // told so a typo'd key isn't silently stuck pending at verify time.
+        let known = known_judgment_keys(&project);
+        let unknown: Vec<String> = verdicts
+            .iter()
+            .map(|v| v.invariant_key.clone())
+            .filter(|k| !known.contains(k))
+            .collect();
         verify::Verify::new(&project)
             .apply_judgments(verdicts)
             .map_err(|e| ErrorObject {
                 code: -32603,
                 message: format!("ingest failed: {e}"),
             })?;
-        Ok(json!({ "ok": true, "ingested": count }))
+        Ok(json!({ "ok": true, "ingested": count, "unknown": unknown }))
     }
 
     fn tool_spec_move(&self, args: &Value) -> Result<Value, ErrorObject> {
@@ -534,6 +572,39 @@ fn drop_null_keys(v: Value) -> Value {
 
 fn project_to_rpc(e: ProjectError) -> ErrorObject {
     ErrorObject { code: -32603, message: e.0 }
+}
+
+/// Collect every judgment-invariant key the project currently defines, in the
+/// `<spec-id>::judgment::<n>` form that `verify` emits. Used to flag ingested
+/// verdicts whose key matches no known invariant.
+fn known_judgment_keys(project: &Project) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for path in project.spec_paths() {
+        if let Ok(doc) = parser::parse_file(&path) {
+            let n = doc.judgment_invariants().count();
+            for i in 1..=n {
+                keys.insert(format!("{}::judgment::{}", doc.id(), i));
+            }
+        }
+    }
+    keys
+}
+
+/// Confine an MCP-supplied spec id to the project. Ids arrive straight from the
+/// client, and `plan`/`verify`/`drift` all accept an id-*or-path*, so before we
+/// hand one to those resolvers we confirm it names a real spec inside the specs
+/// directory via [`Project::find_spec_by_id`]. A traversal or absolute-path id
+/// matches nothing and is rejected with a plain "no such spec" — we deliberately
+/// do not echo the probed filesystem path back to the client.
+fn confine_spec_id(project: &Project, id: &str) -> Result<(), ErrorObject> {
+    if project.find_spec_by_id(id).is_some() {
+        Ok(())
+    } else {
+        Err(ErrorObject {
+            code: -32602,
+            message: "no such spec".to_string(),
+        })
+    }
 }
 
 /// Serialize a response to a JSON-RPC line. The response types are constructed

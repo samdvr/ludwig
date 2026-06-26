@@ -180,3 +180,60 @@ fn move_spec_refuses_overwrite_without_force() {
         .expect_err("must refuse");
     assert!(err.0.contains("already exists"));
 }
+
+// -- spec: atomic-state-writes -----------------------------------------------
+
+fn sample_state() -> ludwig::project::State {
+    let mut s = ludwig::project::State::default();
+    s.specs.insert(
+        "demo".to_string(),
+        ludwig::project::SpecState {
+            version: 1,
+            hash: "abc".to_string(),
+            implementing_files: Default::default(),
+        },
+    );
+    s.last_run = Some("now".to_string());
+    s
+}
+
+/// {deterministic} A load immediately following a write round-trips.
+#[test]
+fn state_write_round_trips() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+    project.write_state(&sample_state()).unwrap();
+    let loaded = project.load_state().unwrap();
+    assert_eq!(loaded.specs.get("demo").unwrap().hash, "abc");
+    assert_eq!(loaded.last_run.as_deref(), Some("now"));
+}
+
+/// {deterministic} After a successful write the state dir holds exactly one
+/// regular file (state.json) — a temp-then-rename impl must not leave residue.
+#[test]
+fn state_write_leaves_no_temp_residue() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+    project.write_state(&sample_state()).unwrap();
+    let mut files: Vec<String> = std::fs::read_dir(project.state_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(files, vec!["state.json".to_string()], "unexpected files: {files:?}");
+}
+
+/// {#b4} The state directory is created first if it does not yet exist.
+#[test]
+fn state_write_creates_state_dir_if_absent() {
+    let dir = TempDir::new("ludwig-test");
+    std::fs::write(dir.path().join("ludwig.yml"), "canonical: spec\n").unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+    assert!(!project.state_dir().is_dir());
+    project.write_state(&sample_state()).unwrap();
+    assert!(project.state_path().is_file());
+}

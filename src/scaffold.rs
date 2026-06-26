@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-
 use crate::error::{ParseError, ProjectError};
 use crate::game::Game;
 use crate::parser;
@@ -204,13 +202,6 @@ pub fn write_spec(
     fs::write(&target, content)
         .map_err(|e| WriteSpecError::Project(ProjectError::new(format!("write {}: {e}", target.display()))))?;
     Ok(target)
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct GameOptions<'a> {
-    pub intent: Option<&'a str>,
-    pub glossary: &'a [(String, String)],
-    pub force: bool,
 }
 
 pub fn create_game(

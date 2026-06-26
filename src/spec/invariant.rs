@@ -24,9 +24,3 @@ pub struct Invariant {
     pub classifier: Classifier,
     pub text: String,
 }
-
-impl Invariant {
-    pub fn is_deterministic(&self) -> bool { self.classifier == Classifier::Deterministic }
-    pub fn is_property(&self) -> bool { self.classifier == Classifier::Property }
-    pub fn is_judgment(&self) -> bool { self.classifier == Classifier::Judgment }
-}

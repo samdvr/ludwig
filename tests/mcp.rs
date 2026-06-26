@@ -114,6 +114,97 @@ fn resources_read_returns_markdown() {
     assert!(text.contains("## Intent"));
 }
 
+// -- spec: mcp-path-confinement ----------------------------------------------
+// The MCP server resolves ids/URIs straight from the client, so a lookup must
+// never read a file outside the project's specs directory.
+
+/// {#b2}/{#b3} + example "parent traversal is rejected": `..` segments in a
+/// resource URI must not escape the project; no out-of-root file is returned.
+#[test]
+fn resources_read_rejects_parent_traversal() {
+    let (dir, project) = make_project_with_minimal_spec();
+    let secret = dir.path().parent().unwrap().join("ludwig_secret_probe.txt");
+    std::fs::write(&secret, "TOP-SECRET-CONTENTS").unwrap();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let uri = format!(
+        "ludwig://spec/../{}",
+        secret.file_name().unwrap().to_str().unwrap()
+    );
+    let resp = call(&server, "resources/read", json!({ "uri": uri }));
+    let _ = std::fs::remove_file(&secret);
+
+    let leaked = resp
+        .pointer("/result/contents/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !leaked.contains("TOP-SECRET"),
+        "traversal leaked an out-of-root file: {leaked:?}"
+    );
+    assert!(resp.pointer("/error").is_some(), "expected an error response");
+}
+
+/// Example "absolute path is rejected": a double-slash URI that decodes to an
+/// absolute path must be refused, not read.
+#[test]
+fn resources_read_rejects_absolute_path() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(
+        &server,
+        "resources/read",
+        json!({ "uri": "ludwig://spec//etc/hosts" }),
+    );
+    assert!(
+        resp.pointer("/result/contents/0/text").is_none(),
+        "absolute-path URI must not return file contents"
+    );
+    assert!(resp.pointer("/error").is_some(), "expected an error response");
+}
+
+/// {#b2}: the same confinement applies to the spec.read tool, which also takes
+/// an id from the wire.
+#[test]
+fn spec_read_rejects_traversal_id() {
+    let (dir, project) = make_project_with_minimal_spec();
+    let secret = dir.path().parent().unwrap().join("ludwig_secret_probe2.txt");
+    std::fs::write(&secret, "TOP-SECRET-CONTENTS").unwrap();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let id = format!("../{}", secret.file_name().unwrap().to_str().unwrap());
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.read", "arguments": { "id": id } }),
+    );
+    let _ = std::fs::remove_file(&secret);
+    // Either a JSON-RPC error, or a tool result that does not contain the secret.
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !text.contains("TOP-SECRET"),
+        "spec.read leaked an out-of-root file: {text:?}"
+    );
+}
+
+/// {#b1} + example "legitimate id resolves": a normal id still works.
+#[test]
+fn resources_read_still_serves_legitimate_spec() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(
+        &server,
+        "resources/read",
+        json!({ "uri": "ludwig://spec/hello-greeter" }),
+    );
+    let text = resp
+        .pointer("/result/contents/0/text")
+        .and_then(Value::as_str)
+        .expect("legitimate id must still resolve");
+    assert!(text.contains("## Intent"));
+}
+
 #[test]
 fn unknown_method_returns_error() {
     let (_dir, project) = make_project_with_minimal_spec();
@@ -318,4 +409,119 @@ fn spec_ingest_judgments_persists_verdicts() {
     let v = state.judgments.get("hello-greeter::judgment::1").expect("verdict persisted");
     assert_eq!(v.verdict, "pass");
     assert_eq!(v.spec_hash.as_deref(), Some("deadbeef"));
+}
+
+// -- open-item fixes ---------------------------------------------------------
+
+/// spec.list error entries must report a root-relative path, not an absolute
+/// one — the success branch already does, and leaking the absolute temp/home
+/// path is both inconsistent and an information leak.
+#[test]
+fn spec_list_error_entry_uses_relative_path() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    // A malformed spec that fails to parse triggers the error branch.
+    std::fs::write(project.specs_dir().join("broken.spec.md"), "not a spec\n").unwrap();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({ "name": "spec.list", "arguments": {} }),
+    );
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    let err_entry = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e.get("error").is_some())
+        .expect("an error entry for the broken spec");
+    let path = err_entry.get("path").and_then(Value::as_str).unwrap();
+    assert_eq!(path, "specs/broken.spec.md", "expected a root-relative path, got {path:?}");
+}
+
+/// initialize must echo a protocol version the client requested when the server
+/// supports it, and otherwise return the server's own supported version.
+#[test]
+fn initialize_echoes_supported_protocol_version() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+
+    let supported = ludwig::mcp::PROTOCOL_VERSION;
+    let resp = call(&server, "initialize", json!({ "protocolVersion": supported }));
+    assert_eq!(
+        resp.pointer("/result/protocolVersion").and_then(Value::as_str),
+        Some(supported),
+        "server should echo a supported version the client asked for"
+    );
+
+    let resp2 = call(&server, "initialize", json!({ "protocolVersion": "1999-01-01" }));
+    assert_eq!(
+        resp2.pointer("/result/protocolVersion").and_then(Value::as_str),
+        Some(supported),
+        "for an unsupported request the server returns its own version"
+    );
+}
+
+/// spec.ingest_judgments should still persist all verdicts (data preservation)
+/// but flag keys that match no known judgment invariant so the agent can fix a
+/// typo'd key instead of having it silently stay pending forever.
+#[test]
+fn ingest_judgments_flags_unknown_keys() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    // A spec carrying one judgment invariant → valid key `judged::judgment::1`.
+    let judged = r#"---
+id: judged
+title: Judged
+status: draft
+owners: []
+implements: []
+depends_on: []
+version: 1
+---
+
+## Intent
+A spec that exists only to carry a judgment invariant so the ingest path has a
+real key to validate against. It does nothing else of interest beyond that.
+
+## Behavior
+- {#b1} It carries a judgment invariant.
+
+## Examples
+```example name="happy"
+Given a setup
+When called
+Then it works
+```
+
+## Invariants
+- {judgment} Errors are explained in plain English.
+"#;
+    std::fs::write(project.specs_dir().join("judged.spec.md"), judged).unwrap();
+    let server = ludwig::mcp::Server::new(Some(project.clone()), None);
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.ingest_judgments",
+            "arguments": {
+                "verdicts": [
+                    { "invariant_key": "judged::judgment::1", "verdict": "pass" },
+                    { "invariant_key": "judged::judgment::99", "verdict": "pass" }
+                ]
+            }
+        }),
+    );
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed.get("ok"), Some(&Value::Bool(true)));
+    let unknown: Vec<String> = parsed
+        .get("unknown")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    assert_eq!(unknown, vec!["judged::judgment::99".to_string()]);
+    // Both are still persisted.
+    let state = project.load_state().unwrap();
+    assert!(state.judgments.contains_key("judged::judgment::1"));
+    assert!(state.judgments.contains_key("judged::judgment::99"));
 }
