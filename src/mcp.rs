@@ -94,13 +94,54 @@ impl Server {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some(response) = self.handle_line(trimmed) {
-                let payload = serialize_response(&response);
+            if let Some(payload) = self.handle_payload(trimmed) {
                 writeln!(out, "{payload}")?;
                 out.flush()?;
             }
         }
         Ok(())
+    }
+
+    /// Handle one input line — a single JSON-RPC request object or a batch
+    /// (array of them) — and return the serialized response line to write, or
+    /// `None` when nothing should be written (a lone notification, or a batch
+    /// composed entirely of notifications). Batches respond with a JSON array of
+    /// responses, excluding notifications, per JSON-RPC 2.0.
+    fn handle_payload(&self, line: &str) -> Option<String> {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some(serialize_response(&ResponseValue {
+                    id: None,
+                    payload: Err(ErrorObject {
+                        code: -32700,
+                        message: format!("parse error: {e}"),
+                    }),
+                }));
+            }
+        };
+        match value {
+            Value::Array(items) => {
+                if items.is_empty() {
+                    // An empty batch array is itself an invalid request.
+                    return Some(serialize_response(&ResponseValue {
+                        id: None,
+                        payload: Err(ErrorObject {
+                            code: -32600,
+                            message: "invalid request: empty batch".to_string(),
+                        }),
+                    }));
+                }
+                let responses: Vec<ResponseValue> =
+                    items.into_iter().filter_map(|item| self.handle_value(item)).collect();
+                if responses.is_empty() {
+                    None
+                } else {
+                    Some(serialize_batch(&responses))
+                }
+            }
+            other => self.handle_value(other).map(|r| serialize_response(&r)),
+        }
     }
 
     /// Process a single request line; returns `None` for notifications (a
@@ -119,6 +160,12 @@ impl Server {
                 });
             }
         };
+        self.handle_value(value)
+    }
+
+    /// Dispatch one already-parsed JSON-RPC message value. Returns `None` for
+    /// notifications (no `id` member); otherwise a response to serialize.
+    fn handle_value(&self, value: Value) -> Option<ResponseValue> {
         let obj = match value.as_object() {
             Some(o) => o,
             None => {
@@ -615,38 +662,29 @@ pub struct ResponseValue {
 
 impl serde::Serialize for ResponseValue {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let (result, error) = match &self.payload {
-            Ok(v) => (Some(v.clone()), None),
-            Err(e) => (
-                None,
-                Some(json!({ "code": e.code, "message": e.message })),
-            ),
-        };
-        let resp = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": self.id,
-            "result": result,
-            "error": error,
-        });
-        // Drop nulls so we don't ship both result and error keys.
-        let cleaned = drop_null_keys(resp);
-        cleaned.serialize(s)
-    }
-}
-
-fn drop_null_keys(v: Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (k, val) in map {
-                if val.is_null() && (k == "result" || k == "error") {
-                    continue;
-                }
-                out.insert(k, val);
+        // A JSON-RPC response MUST carry exactly one of `result` or `error`, and
+        // always an `id` (null when the request id was unknown). Build the map
+        // with only the relevant member so a legitimately-null result (e.g. the
+        // response to a request-shaped `initialized`) is never dropped, which
+        // would leave a response with neither member.
+        let mut map = serde_json::Map::new();
+        map.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+        map.insert(
+            "id".to_string(),
+            self.id.clone().unwrap_or(Value::Null),
+        );
+        match &self.payload {
+            Ok(v) => {
+                map.insert("result".to_string(), v.clone());
             }
-            Value::Object(out)
+            Err(e) => {
+                map.insert(
+                    "error".to_string(),
+                    json!({ "code": e.code, "message": e.message }),
+                );
+            }
         }
-        other => other,
+        Value::Object(map).serialize(s)
     }
 }
 
@@ -709,6 +747,19 @@ fn serialize_response(response: &ResponseValue) -> String {
                 r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal serialization error"}}"#
                     .to_string()
             })
+        }
+    }
+}
+
+/// Serialize a batch of responses to a single JSON-RPC array line. Mirrors
+/// [`serialize_response`]'s guarantee of always emitting well-formed JSON so the
+/// stdout framing the client relies on is never corrupted.
+fn serialize_batch(responses: &[ResponseValue]) -> String {
+    match serde_json::to_string(responses) {
+        Ok(s) => s,
+        Err(_) => {
+            let parts: Vec<String> = responses.iter().map(serialize_response).collect();
+            format!("[{}]", parts.join(","))
         }
     }
 }
@@ -907,5 +958,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn batch_request_returns_array_of_responses() {
+        let server = Server::new(None, None);
+        let batch = r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}]"#;
+        let payload = server.handle_payload(batch).expect("batch yields a response");
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        let arr = value.as_array().expect("batch response is an array");
+        assert_eq!(arr.len(), 2);
+        // Every element carries exactly one of result/error, and an id.
+        for resp in arr {
+            assert!(resp.get("id").is_some());
+            assert_ne!(
+                resp.get("result").is_some(),
+                resp.get("error").is_some(),
+                "exactly one of result/error: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_of_only_notifications_yields_no_response() {
+        let server = Server::new(None, None);
+        // No `id` member → notifications → no responses, so nothing is written.
+        let batch = r#"[{"jsonrpc":"2.0","method":"initialized"},{"jsonrpc":"2.0","method":"ping"}]"#;
+        assert!(server.handle_payload(batch).is_none());
+    }
+
+    #[test]
+    fn empty_batch_is_invalid_request() {
+        let server = Server::new(None, None);
+        let payload = server.handle_payload("[]").expect("empty batch gets an error");
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value.pointer("/error/code"), Some(&Value::from(-32600)));
+    }
+
+    #[test]
+    fn request_shaped_notification_keeps_a_result_member() {
+        // `initialized` dispatched WITH an id returns Ok(Value::Null). The
+        // response must still carry a `result` member (not be dropped), so it
+        // stays a well-formed JSON-RPC response.
+        let server = Server::new(None, None);
+        let resp = server
+            .handle_line(r#"{"jsonrpc":"2.0","id":9,"method":"initialized"}"#)
+            .expect("a response");
+        let value = serde_json::to_value(&resp).unwrap();
+        assert!(value.get("result").is_some(), "result member present: {value}");
+        assert!(value.get("error").is_none());
+        assert_eq!(value.get("id"), Some(&Value::from(9)));
     }
 }

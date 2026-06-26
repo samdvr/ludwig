@@ -472,7 +472,7 @@ fn spec_ingest_judgments_persists_verdicts() {
         .judgments
         .get("hello-greeter::judgment::1")
         .expect("verdict persisted");
-    assert_eq!(v.verdict, "pass");
+    assert_eq!(v.verdict, ludwig::project::Verdict::Pass);
     assert_eq!(v.spec_hash.as_deref(), Some("deadbeef"));
 }
 

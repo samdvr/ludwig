@@ -5,6 +5,11 @@ to natural language as possible. The same prose-first markdown spec drives
 LLM code generation **and** verifies the resulting code. Named after
 Ludwig Wittgenstein.
 
+> **Scope:** Ludwig targets **Rust**. Deterministic checks shell out to
+> `cargo test`, so verifying a project requires a Cargo workspace. The spec
+> format itself is plain markdown, but verification is Rust-specific by design —
+> there is no plan to add adapters for other languages.
+
 ## Why
 
 Today, when a human asks an LLM to write code, the request is a chat message
@@ -258,9 +263,10 @@ v0.1 ships:
 
 Deferred:
 
-- `{property}` invariants (parsed and reported as `skip`)
+- `{property}` invariants — currently parsed but **not** property-tested: an
+  `active` spec with one reports `fail` (you can't rely on an unchecked
+  invariant), a non-active spec reports `skip`. No generator runs yet.
 - `canonical: code` mode (spec-from-code)
-- Adapters for other languages
 
 ## Development
 

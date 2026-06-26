@@ -109,7 +109,7 @@ fn first_run_marks_judgment_pending() {
     let pending: Vec<_> = report
         .checks
         .iter()
-        .filter(|c| c.status == "pending_judgment")
+        .filter(|c| c.status == ludwig::verify::CheckStatus::PendingJudgment)
         .collect();
     assert_eq!(pending.len(), 1, "expected exactly one pending judgment");
 }
@@ -137,13 +137,13 @@ fn ingesting_verdict_resolves_pending() {
     let pending: Vec<_> = second
         .checks
         .iter()
-        .filter(|c| c.status == "pending_judgment")
+        .filter(|c| c.status == ludwig::verify::CheckStatus::PendingJudgment)
         .collect();
     assert!(pending.is_empty(), "judgment should be resolved");
     let judgments_pass: Vec<_> = second
         .checks
         .iter()
-        .filter(|c| c.kind == "judgment" && c.status == "pass")
+        .filter(|c| c.kind == "judgment" && c.status == ludwig::verify::CheckStatus::Pass)
         .collect();
     assert_eq!(judgments_pass.len(), 1);
 }
@@ -171,7 +171,7 @@ fn ingested_verdict_invalidated_when_spec_changes() {
     let pending: Vec<_> = second
         .checks
         .iter()
-        .filter(|c| c.status == "pending_judgment")
+        .filter(|c| c.status == ludwig::verify::CheckStatus::PendingJudgment)
         .collect();
     assert_eq!(pending.len(), 1, "stale-hash verdict must not satisfy the check");
 }

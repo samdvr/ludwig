@@ -308,10 +308,12 @@ fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
     )
 }
 
-/// Hand-rolled glob: only supports `*` (any chars except `/`), `**` (any chars),
-/// and `?` (single char except `/`). Adequate for the patterns the spec system
-/// uses (`src/foo/*.rs`, `src/foo.*`). Bracket character classes are NOT
-/// supported — `[` and `]` are escaped so they are matched literally.
+/// Hand-rolled glob: supports `*` (any chars except `/`), `**` (any chars
+/// including `/`), and `?` (single char except `/`). A `**` bounded by path
+/// separators — `a/**/b`, a leading `**/`, or a trailing `/**` — matches zero
+/// or more intervening segments, so `src/**/*.rs` also matches `src/foo.rs`.
+/// Bracket character classes are NOT supported — `[` and `]` are escaped so
+/// they are matched literally.
 pub(crate) fn glob_expand(root: &std::path::Path, pattern: &str) -> Vec<PathBuf> {
     let regex_str = glob_to_regex(pattern);
     let re = match regex::Regex::new(&regex_str) {
@@ -350,7 +352,26 @@ fn glob_to_regex(pat: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         if c == '*' {
-            if i + 1 < chars.len() && chars[i + 1] == '*' {
+            let is_double = i + 1 < chars.len() && chars[i + 1] == '*';
+            if is_double {
+                // A `**` flanked by separators should be allowed to collapse to
+                // nothing so `src/**/foo` also matches `src/foo`. We detect a
+                // following `/` and a preceding boundary (start of pattern, or a
+                // `/` we already emitted) and emit an optional segment group.
+                let next_is_slash = i + 2 < chars.len() && chars[i + 2] == '/';
+                let at_boundary = out == "^" || out.ends_with('/');
+                if next_is_slash && at_boundary {
+                    if out.ends_with('/') {
+                        out.pop();
+                        out.push_str("(?:/.*)?/");
+                    } else {
+                        // leading `**/`: optionally match any leading segments
+                        out.push_str("(?:.*/)?");
+                    }
+                    i += 3; // consume `*`, `*`, `/`
+                    continue;
+                }
+                // bare `**`, or `**` not bounded by separators: match anything.
                 out.push_str(".*");
                 i += 2;
                 continue;
@@ -391,5 +412,27 @@ mod tests {
         assert!(!pattern_escapes_root("src/lib.rs"));
         assert!(!pattern_escapes_root("src/adapters/*.rs"));
         assert!(!pattern_escapes_root("crate/sub/mod.rs"));
+    }
+
+    #[test]
+    fn double_star_matches_zero_or_more_directories() {
+        let re = |pat: &str| regex::Regex::new(&super::glob_to_regex(pat)).unwrap();
+
+        // `src/**/*.rs` must match a file directly under src AND one nested deep.
+        let r = re("src/**/*.rs");
+        assert!(r.is_match("src/foo.rs"), "should match zero intervening dirs");
+        assert!(r.is_match("src/a/b/foo.rs"), "should match nested dirs");
+        assert!(!r.is_match("other/foo.rs"));
+        assert!(!r.is_match("src/foo.txt"));
+
+        // Leading `**/` matches at any depth, including the root.
+        let r = re("**/mod.rs");
+        assert!(r.is_match("mod.rs"));
+        assert!(r.is_match("a/b/mod.rs"));
+
+        // Single `*` does not cross a path separator.
+        let r = re("src/*.rs");
+        assert!(r.is_match("src/foo.rs"));
+        assert!(!r.is_match("src/a/foo.rs"));
     }
 }

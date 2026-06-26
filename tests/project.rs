@@ -304,3 +304,54 @@ fn new_spec_refuses_duplicate() {
     let err = ludwig::scaffold::new_spec(&p, "thing", None).expect_err("must refuse");
     assert!(err.0.contains("already exists"));
 }
+
+const MINIMAL_SPEC: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/specs/valid/minimal.spec.md"
+));
+
+/// Two spec files declaring the same frontmatter id are flagged by the index,
+/// and `by_id` keeps exactly one entry (first-seen path) so downstream lookups
+/// stay deterministic.
+#[test]
+fn index_specs_flags_duplicate_ids() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let p = ludwig::project::Project::open(dir.path()).unwrap();
+    std::fs::write(p.specs_dir().join("copy-a.spec.md"), MINIMAL_SPEC).unwrap();
+    std::fs::write(p.specs_dir().join("copy-b.spec.md"), MINIMAL_SPEC).unwrap();
+
+    let index = p.index_specs();
+    assert!(index.parse_errors.is_empty());
+    assert_eq!(index.by_id.len(), 1, "the shared id collapses to one entry");
+    assert_eq!(index.duplicates.len(), 1, "the duplicate id is reported");
+    let (_, paths) = index.duplicates.iter().next().unwrap();
+    assert_eq!(paths.len(), 2);
+}
+
+/// A spec that fails to parse is surfaced in `parse_errors` rather than silently
+/// dropped — the gap that let `verify --all` green-light a broken spec.
+#[test]
+fn index_specs_collects_parse_errors() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let p = ludwig::project::Project::open(dir.path()).unwrap();
+    std::fs::write(p.specs_dir().join("good.spec.md"), MINIMAL_SPEC).unwrap();
+    std::fs::write(p.specs_dir().join("broken.spec.md"), "not a real spec\n").unwrap();
+
+    let index = p.index_specs();
+    assert_eq!(index.by_id.len(), 1);
+    assert_eq!(index.parse_errors.len(), 1);
+    assert!(index.parse_errors[0].0.ends_with("broken.spec.md"));
+}
+
+/// A `ludwig.yml` that points `specs_dir` outside the project root (here via a
+/// `..` segment) is rejected at open time so no derived path can escape.
+#[test]
+fn config_with_escaping_specs_dir_is_rejected() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    std::fs::write(dir.path().join("ludwig.yml"), "specs_dir: ../escape\n").unwrap();
+    let err = ludwig::project::Project::open(dir.path()).expect_err("must reject");
+    assert!(err.0.contains("specs_dir"), "got: {}", err.0);
+}

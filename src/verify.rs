@@ -27,22 +27,37 @@ pub struct Report {
 pub struct Check {
     pub kind: String,
     pub name: String,
-    pub status: String,
+    pub status: CheckStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// The outcome of a single check. Serializes to the same strings the report
+/// JSON has always used (`pass`, `fail`, `pending_judgment`, `skip`) via
+/// `rename_all`, but as a closed enum every match over it is exhaustive — a new
+/// variant can't be silently dropped from [`summarize`] or [`render_text`], and
+/// a typo'd status is a compile error rather than a check that vanishes from the
+/// summary counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    PendingJudgment,
+    Skip,
 }
 
 impl Check {
     fn new(
         kind: impl Into<String>,
         name: impl Into<String>,
-        status: impl Into<String>,
+        status: CheckStatus,
         detail: Option<String>,
     ) -> Self {
         Self {
             kind: kind.into(),
             name: name.into(),
-            status: status.into(),
+            status,
             detail,
         }
     }
@@ -71,7 +86,7 @@ pub struct JudgmentPrompt {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IngestedVerdict {
     pub invariant_key: String,
-    pub verdict: String,
+    pub verdict: crate::project::Verdict,
     #[serde(default)]
     pub rationale: Option<String>,
     #[serde(default)]
@@ -203,13 +218,13 @@ impl<'a> Verify<'a> {
         out.push(Check::new(
             "structural",
             "parseable",
-            "pass",
+            CheckStatus::Pass,
             Some("parsed cleanly".into()),
         ));
         out.push(Check::new(
             "structural",
             "frontmatter-version",
-            "pass",
+            CheckStatus::Pass,
             Some(format!("version={}", doc.version())),
         ));
 
@@ -219,7 +234,7 @@ impl<'a> Verify<'a> {
                 out.push(Check::new(
                     "structural",
                     format!("implements:{pat}"),
-                    "fail",
+                    CheckStatus::Fail,
                     Some(
                         "no files match this glob; either remove from implements: or generate the file"
                             .into(),
@@ -239,7 +254,7 @@ impl<'a> Verify<'a> {
                         out.push(Check::new(
                             "structural",
                             format!("stamp:{rel}"),
-                            "fail",
+                            CheckStatus::Fail,
                             Some(format!("read failed: {e}")),
                         ));
                         continue;
@@ -249,19 +264,19 @@ impl<'a> Verify<'a> {
                     None => out.push(Check::new(
                         "structural",
                         format!("stamp:{rel}"),
-                        "fail",
+                        CheckStatus::Fail,
                         Some("missing trailing `ludwig-spec:` comment".into()),
                     )),
                     Some(stamp) if stamp.id != doc.id() => out.push(Check::new(
                         "structural",
                         format!("stamp:{rel}"),
-                        "fail",
+                        CheckStatus::Fail,
                         Some(format!("stamped for {}, expected {}", stamp.id, doc.id())),
                     )),
                     Some(stamp) if stamp.hash != doc.canonical_hash() => out.push(Check::new(
                         "structural",
                         format!("stamp:{rel}"),
-                        "fail",
+                        CheckStatus::Fail,
                         Some(format!(
                             "spec drifted since stamp ({} → {})",
                             drift::short_hash(stamp.hash),
@@ -271,7 +286,7 @@ impl<'a> Verify<'a> {
                     Some(_) => out.push(Check::new(
                         "structural",
                         format!("stamp:{rel}"),
-                        "pass",
+                        CheckStatus::Pass,
                         Some("in sync".into()),
                     )),
                 }
@@ -319,7 +334,10 @@ impl<'a> Verify<'a> {
             let stored = state.judgments.get(&p.invariant_key);
             match stored {
                 Some(v) if v.spec_hash.as_deref() == Some(p.spec_hash.as_str()) => {
-                    let status = if v.verdict == "pass" { "pass" } else { "fail" };
+                    let status = match v.verdict {
+                        crate::project::Verdict::Pass => CheckStatus::Pass,
+                        crate::project::Verdict::Fail => CheckStatus::Fail,
+                    };
                     out.push(Check::new(
                         "judgment",
                         truncate(&p.invariant_text, 60),
@@ -330,7 +348,7 @@ impl<'a> Verify<'a> {
                 _ => out.push(Check::new(
                     "judgment",
                     truncate(&p.invariant_text, 60),
-                    "pending_judgment",
+                    CheckStatus::PendingJudgment,
                     Some(
                         "awaiting verdict from host agent (run `ludwig verify --ingest-judgments <file>`)"
                             .into(),
@@ -391,12 +409,11 @@ pub fn render_text(report: &Report) -> String {
         drift::short_hash(&report.spec_hash),
     ));
     for c in &report.checks {
-        let mark = match c.status.as_str() {
-            "pass" => "ok  ",
-            "fail" => "FAIL",
-            "pending_judgment" => "pend",
-            "skip" => "skip",
-            _ => "??  ",
+        let mark = match c.status {
+            CheckStatus::Pass => "ok  ",
+            CheckStatus::Fail => "FAIL",
+            CheckStatus::PendingJudgment => "pend",
+            CheckStatus::Skip => "skip",
         };
         out.push_str(&format!("  [{mark}] {}: {}", c.kind, c.name));
         if let Some(d) = c.detail.as_deref()
@@ -458,9 +475,9 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
             .trim()
             .to_string();
         let status = match t.status {
-            TestStatus::Pass => "pass",
-            TestStatus::Fail => "fail",
-            TestStatus::Skip => "skip",
+            TestStatus::Pass => CheckStatus::Pass,
+            TestStatus::Fail => CheckStatus::Fail,
+            TestStatus::Skip => CheckStatus::Skip,
         };
         let detail = match t.status {
             TestStatus::Skip => Some("test ignored — fill in the `todo!()` body".into()),
@@ -493,7 +510,7 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
         out.push(Check::new(
             "deterministic",
             "test-runner",
-            "fail",
+            CheckStatus::Fail,
             Some(detail),
         ));
     }
@@ -505,14 +522,14 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
     for inv in doc.property_invariants() {
         let (status, detail) = if active {
             (
-                "fail",
+                CheckStatus::Fail,
                 "property invariants are not yet machine-verified (deferred to v0.2). \
                  An `active` spec cannot rely on unverified invariants — move to draft, \
                  rewrite the invariant as {deterministic}, or downgrade it to {judgment}.",
             )
         } else {
             (
-                "skip",
+                CheckStatus::Skip,
                 "property-based generation deferred to v0.2; skipped on non-active spec",
             )
         };
@@ -542,7 +559,7 @@ fn missing_test_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec<
             out.push(Check::new(
                 "deterministic",
                 format!("example:{} (missing)", ex.name),
-                "fail",
+                CheckStatus::Fail,
                 Some(format!(
                     "no `fn {expected}` in tests/ludwig_<slug>.rs; add a #[test] for this example"
                 )),
@@ -555,7 +572,7 @@ fn missing_test_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec<
             out.push(Check::new(
                 "deterministic",
                 format!("invariant:{} (missing)", truncate(&inv.text, 40)),
-                "fail",
+                CheckStatus::Fail,
                 Some(format!(
                     "no `fn {expected}` in tests/ludwig_<slug>.rs; add a #[test] for this invariant"
                 )),
@@ -584,7 +601,7 @@ fn test_file_stamp_check(
             return vec![Check::new(
                 "structural",
                 format!("stamp:{rel}"),
-                "fail",
+                CheckStatus::Fail,
                 Some(format!("read failed: {e}")),
             )];
         }
@@ -593,7 +610,7 @@ fn test_file_stamp_check(
         None => vec![Check::new(
             "structural",
             format!("stamp:{rel}"),
-            "fail",
+            CheckStatus::Fail,
             Some(
                 "test file has no trailing `ludwig-spec:` stamp — restore it or delete the file and re-render"
                     .into(),
@@ -602,13 +619,13 @@ fn test_file_stamp_check(
         Some(stamp) if stamp.id != doc.id() => vec![Check::new(
             "structural",
             format!("stamp:{rel}"),
-            "fail",
+            CheckStatus::Fail,
             Some(format!("stamped for {}, expected {}", stamp.id, doc.id())),
         )],
         Some(stamp) if stamp.hash != doc.canonical_hash() => vec![Check::new(
             "structural",
             format!("stamp:{rel}"),
-            "fail",
+            CheckStatus::Fail,
             Some(format!(
                 "test file stamp drifted ({} → {}); re-run `ludwig verify` to update",
                 drift::short_hash(stamp.hash),
@@ -618,7 +635,7 @@ fn test_file_stamp_check(
         Some(_) => vec![Check::new(
             "structural",
             format!("stamp:{rel}"),
-            "pass",
+            CheckStatus::Pass,
             Some("in sync".into()),
         )],
     }
@@ -627,12 +644,11 @@ fn test_file_stamp_check(
 fn summarize(checks: &[Check]) -> Summary {
     let mut s = Summary::default();
     for c in checks {
-        match c.status.as_str() {
-            "pass" => s.pass += 1,
-            "fail" => s.fail += 1,
-            "pending_judgment" => s.pending += 1,
-            "skip" => s.skip += 1,
-            _ => {}
+        match c.status {
+            CheckStatus::Pass => s.pass += 1,
+            CheckStatus::Fail => s.fail += 1,
+            CheckStatus::PendingJudgment => s.pending += 1,
+            CheckStatus::Skip => s.skip += 1,
         }
     }
     s
@@ -662,6 +678,33 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::adapters::RunResult;
+
+    /// The on-disk / over-the-wire status strings are part of the report's
+    /// contract (consumed by the MCP client and persisted JSON). Pin them so a
+    /// future rename of the enum variants can't silently change the format.
+    #[test]
+    fn check_status_serializes_to_stable_strings() {
+        let cases = [
+            (CheckStatus::Pass, "\"pass\""),
+            (CheckStatus::Fail, "\"fail\""),
+            (CheckStatus::PendingJudgment, "\"pending_judgment\""),
+            (CheckStatus::Skip, "\"skip\""),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_string(&status).unwrap(), expected);
+            let back: CheckStatus = serde_json::from_str(expected).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn verdict_serializes_to_stable_strings() {
+        use crate::project::Verdict;
+        assert_eq!(serde_json::to_string(&Verdict::Pass).unwrap(), "\"pass\"");
+        assert_eq!(serde_json::to_string(&Verdict::Fail).unwrap(), "\"fail\"");
+        // A malformed verdict is rejected rather than silently coerced.
+        assert!(serde_json::from_str::<Verdict>("\"maybe\"").is_err());
+    }
 
     const MINIMAL_SPEC: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

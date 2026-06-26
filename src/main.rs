@@ -180,16 +180,32 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let project = Project::discover(std::env::current_dir()?)?;
             let paths = paths_for(&project, path)?;
             let mut failures = 0u32;
+            // Track which file first claimed each id so we can flag any id
+            // declared by more than one spec — duplicates silently corrupt
+            // per-id state and collide on the generated test file name.
+            let mut seen_ids: std::collections::HashMap<String, PathBuf> =
+                std::collections::HashMap::new();
             for p in &paths {
                 match parser::parse_file(p) {
                     Ok(doc) => {
-                        if !quiet {
+                        if let Some(first) = seen_ids.get(doc.id()) {
+                            failures += 1;
+                            println!("  err {}", rel(&project, p));
                             println!(
-                                "  ok  {}  ({} v{})",
-                                rel(&project, p),
+                                "      duplicate spec id {:?} (also declared by {})",
                                 doc.id(),
-                                doc.version()
+                                rel(&project, first)
                             );
+                        } else {
+                            seen_ids.insert(doc.id().to_string(), p.clone());
+                            if !quiet {
+                                println!(
+                                    "  ok  {}  ({} v{})",
+                                    rel(&project, p),
+                                    doc.id(),
+                                    doc.version()
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -233,7 +249,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            let ids = resolve_ids(&project, id, all)?;
+            let resolved = resolve_ids(&project, id, all)?;
+            // Project-integrity problems (unparseable specs, duplicate ids)
+            // found while resolving `--all`. Surface them on stderr and force a
+            // non-zero exit so a broken spec can never be silently skipped by
+            // `verify --all` in CI.
+            for p in &resolved.problems {
+                eprintln!("error: {p}");
+            }
+            let ids = resolved.ids;
             let mut all_prompts: Vec<verify::JudgmentPrompt> = Vec::new();
             let mut all_reports: Vec<verify::Report> = Vec::new();
             let mut total_pass = 0u32;
@@ -289,7 +313,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     "strict: {total_pending} judgment(s) still pending — ingest verdicts before this passes."
                 );
             }
-            Ok(if specs_failed > 0 || strict_fail {
+            let had_problems = !resolved.problems.is_empty();
+            Ok(if specs_failed > 0 || strict_fail || had_problems {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS
@@ -297,9 +322,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Cmd::Diff { id, all, json } => {
             let project = Project::discover(std::env::current_dir()?)?;
-            let ids = resolve_ids(&project, id, all)?;
+            let resolved = resolve_ids(&project, id, all)?;
+            for p in &resolved.problems {
+                eprintln!("error: {p}");
+            }
             let mut reports: Vec<drift::DriftReport> = Vec::new();
-            for spec_id in ids {
+            for spec_id in resolved.ids {
                 let report = drift::report(&project, &spec_id)?;
                 if json {
                     reports.push(report);
@@ -310,7 +338,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&reports)?);
             }
-            Ok(ExitCode::SUCCESS)
+            Ok(if resolved.problems.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
         }
         Cmd::Mcp { root, no_exec } => {
             mcp::Server::new(None, root).with_exec(!no_exec).run()?;
@@ -429,21 +461,41 @@ fn rel(project: &Project, path: &std::path::Path) -> String {
         .into_owned()
 }
 
+/// Spec ids to operate on, plus any project-integrity problems found while
+/// resolving them (only populated for `--all`, which scans the whole tree).
+struct Resolved {
+    ids: Vec<String>,
+    problems: Vec<String>,
+}
+
 fn resolve_ids(
     project: &Project,
     id: Option<String>,
     all: bool,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<Resolved> {
     if all {
-        let mut out: Vec<String> = Vec::new();
-        for p in project.spec_paths() {
-            if let Ok(doc) = parser::parse_file(&p) {
-                out.push(doc.id().to_string());
-            }
+        let index = project.index_specs();
+        let mut problems: Vec<String> = Vec::new();
+        for (path, message) in &index.parse_errors {
+            problems.push(format!("{} failed to parse: {message}", rel(project, path)));
         }
-        Ok(out)
+        for (id, paths) in &index.duplicates {
+            let list = paths
+                .iter()
+                .map(|p| rel(project, p))
+                .collect::<Vec<_>>()
+                .join(", ");
+            problems.push(format!(
+                "duplicate spec id {id:?} declared by {} files: {list}",
+                paths.len()
+            ));
+        }
+        Ok(Resolved {
+            ids: index.by_id.into_keys().collect(),
+            problems,
+        })
     } else if let Some(id) = id {
-        Ok(vec![id])
+        Ok(Resolved { ids: vec![id], problems: Vec::new() })
     } else {
         anyhow::bail!("specify an ID or pass --all");
     }

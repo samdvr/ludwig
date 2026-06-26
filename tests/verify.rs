@@ -299,7 +299,7 @@ Then it returns 7
     let property_fail = report
         .checks
         .iter()
-        .any(|c| c.kind == "property" && c.status == "fail");
+        .any(|c| c.kind == "property" && c.status == ludwig::verify::CheckStatus::Fail);
     assert!(property_fail, "property check must report fail on active");
 }
 
@@ -457,7 +457,7 @@ Then it returns 8
     let missing = report
         .checks
         .iter()
-        .find(|c| c.name.contains("example:four") && c.status == "fail");
+        .find(|c| c.name.contains("example:four") && c.status == ludwig::verify::CheckStatus::Fail);
     assert!(
         missing.is_some(),
         "missing example test must be flagged; got:\n{:#?}",

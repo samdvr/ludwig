@@ -62,10 +62,33 @@ pub struct SpecState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JudgmentVerdict {
-    pub verdict: String,
+    pub verdict: Verdict,
     pub rationale: Option<String>,
     pub spec_id: Option<String>,
     pub spec_hash: Option<String>,
+}
+
+/// A judgment verdict supplied by the host agent. Serializes to `"pass"` /
+/// `"fail"` (unchanged on disk and over MCP), but as a closed enum a malformed
+/// verdict is rejected at ingest time instead of silently collapsing to `fail`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    Pass,
+    Fail,
+}
+
+/// Result of a single-pass parse of every spec in the project. See
+/// [`Project::index_specs`].
+#[derive(Debug, Default)]
+pub struct SpecIndex {
+    /// Parseable specs, keyed by frontmatter id (first-seen path wins on a
+    /// duplicate, matching `find_spec_by_id`).
+    pub by_id: BTreeMap<String, PathBuf>,
+    /// `(path, message)` for specs that failed to parse.
+    pub parse_errors: Vec<(PathBuf, String)>,
+    /// Ids declared by more than one file, mapped to every declaring path.
+    pub duplicates: BTreeMap<String, Vec<PathBuf>>,
 }
 
 impl Project {
@@ -160,6 +183,35 @@ impl Project {
             }
         }
         None
+    }
+
+    /// Scan and parse every spec once, returning an id→path index plus the
+    /// integrity problems found along the way: specs that fail to parse, and
+    /// ids claimed by more than one file. Built in a single pass so callers that
+    /// need the whole project (`verify --all`, `diff --all`, `parse`) don't
+    /// re-walk and re-parse the specs tree per spec. The index keeps the
+    /// first-seen path for a duplicated id, matching [`find_spec_by_id`].
+    pub fn index_specs(&self) -> SpecIndex {
+        let mut by_id: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let mut parse_errors: Vec<(PathBuf, String)> = Vec::new();
+        let mut duplicates: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        for p in self.spec_paths() {
+            match parser::parse_file(&p) {
+                Ok(doc) => {
+                    let id = doc.id().to_string();
+                    if let Some(first) = by_id.get(&id) {
+                        duplicates
+                            .entry(id)
+                            .or_insert_with(|| vec![first.clone()])
+                            .push(p);
+                    } else {
+                        by_id.insert(id, p);
+                    }
+                }
+                Err(e) => parse_errors.push((p, e.message)),
+            }
+        }
+        SpecIndex { by_id, parse_errors, duplicates }
     }
 
     pub fn load_state(&self) -> Result<State, ProjectError> {
@@ -296,6 +348,19 @@ fn load_config(root: &Path) -> Result<Config, ProjectError> {
     // Merge with defaults: deserialize directly, missing keys default.
     let cfg: Config = serde_yaml::from_value(parsed)
         .map_err(|e| ProjectError::new(format!("{CONFIG_FILE} schema: {e}")))?;
+    // `specs_dir` and `state_dir` are joined onto the project root and then
+    // walked/written. A config that points them outside the tree (absolute, a
+    // drive prefix, or a `..` segment) would let Ludwig read or write arbitrary
+    // locations, so reject those at load time — every path derived from the
+    // project stays confined to the root.
+    for (field, value) in [("specs_dir", &cfg.specs_dir), ("state_dir", &cfg.state_dir)] {
+        if crate::util::pattern_escapes_root(value) {
+            return Err(ProjectError::new(format!(
+                "{CONFIG_FILE} `{field}` must be a project-relative path \
+                 (no leading `/`, drive prefix, or `..` segments): {value:?}"
+            )));
+        }
+    }
     Ok(cfg)
 }
 
