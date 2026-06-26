@@ -1,0 +1,4 @@
+# Keep spec fixtures checked out with LF on every platform. Several tests hash
+# these files and assert byte-stable canonical output; letting git's autocrlf
+# rewrite them to CRLF on Windows would change what the tests read from disk.
+tests/fixtures/**/*.spec.md text eol=lf

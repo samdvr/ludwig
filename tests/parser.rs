@@ -76,7 +76,16 @@ fn minimal_spec_parses() {
 
 #[test]
 fn canonical_hash_stable_across_whitespace() {
-    let raw = std::fs::read_to_string(fixture("valid", "minimal.spec.md")).unwrap();
+    // Normalize the fixture to LF first so the test is independent of how git
+    // checked the file out (autocrlf gives CRLF on Windows). The perturbation
+    // below then adds trailing whitespace + CRLF to a known-LF base, which is
+    // exactly the "line-ending style and trailing whitespace must not change
+    // the hash" invariant we mean to assert. Without the LF base, on a CRLF
+    // checkout the replace would inject `\r  \r\n` sequences that normalize to
+    // extra blank lines and legitimately change the canonical body.
+    let raw = std::fs::read_to_string(fixture("valid", "minimal.spec.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
     let a = ludwig::parser::parse(&raw).unwrap().canonical_hash();
     let perturbed = raw.replace('\n', "  \r\n");
     let b = ludwig::parser::parse(&perturbed).unwrap().canonical_hash();
