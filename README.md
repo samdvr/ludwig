@@ -110,6 +110,26 @@ file is load-bearing — don't hand-edit it.
    `ludwig verify --ingest-judgments <file>`. Verdicts are keyed by the spec
    hash, so changing the spec invalidates old verdicts automatically.
 
+`{property}` invariants are parsed but not yet machine-verified — no generator
+runs. Rather than silently pass, Ludwig reacts to the spec's status: on an
+`active` spec each property invariant reports `fail` (you can't rely on an
+invariant nothing checked), and on a draft/deprecated spec it reports `skip`.
+See `docs/specs/property-invariants-deferred.spec.md`.
+
+### Canonical direction
+
+The `canonical:` setting in `ludwig.yml` decides which side is the source of
+truth when a spec and its code diverge:
+
+- `spec` (default) — the spec leads. On drift, the code is stale; `ludwig diff`
+  tells you to regenerate or bump the spec version.
+- `code` — the code leads (spec-from-code). On drift, the spec is the stale
+  side; `ludwig diff` tells you to update the spec to match the code, then
+  re-verify. The skill guidance flips accordingly.
+
+An unknown value is rejected at load time. (Ludwig does not yet *derive* a spec
+from code — see Deferred.)
+
 ## Installation
 
 ```bash
@@ -263,10 +283,14 @@ v0.1 ships:
 
 Deferred:
 
-- `{property}` invariants — currently parsed but **not** property-tested: an
-  `active` spec with one reports `fail` (you can't rely on an unchecked
-  invariant), a non-active spec reports `skip`. No generator runs yet.
-- `canonical: code` mode (spec-from-code)
+- Property-based **generation** — `{property}` invariants are parsed and their
+  verification policy is defined and tested (active → `fail`, non-active →
+  `skip`; see "Verification, in three layers"), but no generator produces or
+  runs property tests yet.
+- **spec-from-code generation** — `canonical: code` mode flips drift semantics
+  so the spec is the stale side (see "Canonical direction"), but Ludwig does
+  not yet derive or auto-update a spec from existing code; you update the spec
+  yourself, then re-verify.
 
 ## Development
 

@@ -200,3 +200,88 @@ fn drift_distinguishes_version_bump_from_body_edit() {
         "expected detail to call out v99 → v1, got: {detail}"
     );
 }
+
+/// Reopen `dir` as a project configured with `canonical: code`. The scaffold
+/// always writes `spec`, so flip the config on disk and reload.
+fn open_in_code_mode(dir: &TempDir) -> ludwig::project::Project {
+    std::fs::write(
+        dir.path().join("ludwig.yml"),
+        "canonical: code\nspecs_dir: specs\nstate_dir: .ludwig\n",
+    )
+    .unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+    assert!(project.canonical_mode().is_code(), "fixture must be in code mode");
+    project
+}
+
+#[test]
+fn code_mode_stale_stamp_points_at_the_spec() {
+    // In code mode the code is canonical, so a moved spec hash means the SPEC
+    // is the stale side — the remedy must point there, not at "regenerate".
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = open_in_code_mode(&dir);
+    let doc = write_doubler_spec(&project);
+
+    let src = project.root.join("src").join("stub.rs");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(
+        &src,
+        format!(
+            "pub fn call_it() -> i32 {{ 42 }}\n// ludwig-spec: {}@{} hash=abc1234abc1234abc1234abc1234abc1234abc1234abc1234abc1234abc1234abc\n",
+            doc.id(),
+            doc.version(),
+        ),
+    )
+    .unwrap();
+
+    let report = ludwig::drift::report(&project, "stub").unwrap();
+    assert_eq!(report.files[0].status, ludwig::drift::FileDriftStatus::StaleStamp);
+    let detail = report.files[0].detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("code is canonical") && detail.contains("reconcile the spec"),
+        "code-mode stale stamp must point at the spec, got: {detail}"
+    );
+    assert!(
+        !detail.contains("regenerate"),
+        "code-mode remedy must not tell the user to regenerate code, got: {detail}"
+    );
+}
+
+#[test]
+fn code_mode_body_changed_says_spec_is_behind() {
+    // The headline flip: editing the code in code mode means the spec is now
+    // behind and should be updated to match.
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = open_in_code_mode(&dir);
+    let doc = write_doubler_spec(&project);
+
+    let src = project.root.join("src").join("stub.rs");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    let initial = format!(
+        "pub fn call_it() -> i32 {{ 42 }}\n// ludwig-spec: {}@{} hash={}\n",
+        doc.id(),
+        doc.version(),
+        doc.canonical_hash()
+    );
+    std::fs::write(&src, &initial).unwrap();
+    ludwig::drift::record(&project, &doc, std::slice::from_ref(&src)).unwrap();
+
+    // Edit the code body, keeping the stamp intact.
+    let edited = format!(
+        "pub fn call_it() -> i32 {{ 43 }}\n// ludwig-spec: {}@{} hash={}\n",
+        doc.id(),
+        doc.version(),
+        doc.canonical_hash()
+    );
+    std::fs::write(&src, edited).unwrap();
+
+    let report = ludwig::drift::report(&project, "stub").unwrap();
+    assert_eq!(report.files[0].status, ludwig::drift::FileDriftStatus::BodyChanged);
+    let detail = report.files[0].detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("spec is now behind") && detail.contains("update the spec"),
+        "code-mode body change must say the spec is behind, got: {detail}"
+    );
+}

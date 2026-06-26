@@ -18,24 +18,51 @@ pub struct Project {
     pub config: Config,
 }
 
+/// Which side is the source of truth when a spec and its implementing code
+/// diverge. Closed enum so an unknown `canonical:` value in `ludwig.yml` is a
+/// hard load-time error (via serde's unknown-variant rejection) rather than a
+/// string that silently behaves like neither mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Canonical {
+    /// The spec leads: on drift, the code is stale and is regenerated to match.
+    #[default]
+    Spec,
+    /// The code leads (spec-from-code): on drift, the spec is stale and is
+    /// updated to match the code.
+    Code,
+}
+
+impl Canonical {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Spec => "spec",
+            Self::Code => "code",
+        }
+    }
+
+    pub fn is_code(&self) -> bool {
+        matches!(self, Self::Code)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_canonical")]
-    pub canonical: String,
+    #[serde(default)]
+    pub canonical: Canonical,
     #[serde(default = "default_specs_dir")]
     pub specs_dir: String,
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
 }
 
-fn default_canonical() -> String { "spec".to_string() }
 fn default_specs_dir() -> String { DEFAULT_SPECS_DIR.to_string() }
 fn default_state_dir() -> String { DEFAULT_STATE_DIR.to_string() }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            canonical: default_canonical(),
+            canonical: Canonical::default(),
             specs_dir: default_specs_dir(),
             state_dir: default_state_dir(),
         }
@@ -123,7 +150,7 @@ impl Project {
     pub fn reports_dir(&self) -> PathBuf { self.state_dir().join("reports") }
     pub fn cache_dir(&self) -> PathBuf { self.state_dir().join("cache") }
     pub fn pending_dir(&self) -> PathBuf { self.state_dir().join("pending") }
-    pub fn canonical_mode(&self) -> &str { &self.config.canonical }
+    pub fn canonical_mode(&self) -> Canonical { self.config.canonical }
 
     /// All `*.spec.md` files under specs_dir, sorted.
     pub fn spec_paths(&self) -> Vec<PathBuf> {
@@ -344,6 +371,24 @@ fn load_config(root: &Path) -> Result<Config, ProjectError> {
         .map_err(|e| ProjectError::new(format!("{CONFIG_FILE} invalid: {e}")))?;
     if !parsed.is_mapping() {
         return Err(ProjectError::new(format!("{CONFIG_FILE} must contain a mapping")));
+    }
+    // Validate `canonical` up front with a message that names the key and its
+    // legal values — serde's own unknown-variant error mentions neither, so a
+    // typo like `canonical: coed` would otherwise be opaque.
+    if let Some(value) = parsed.get("canonical") {
+        match value.as_str() {
+            Some("spec") | Some("code") => {}
+            Some(other) => {
+                return Err(ProjectError::new(format!(
+                    "{CONFIG_FILE} `canonical` must be \"spec\" or \"code\", got {other:?}"
+                )));
+            }
+            None => {
+                return Err(ProjectError::new(format!(
+                    "{CONFIG_FILE} `canonical` must be a string (\"spec\" or \"code\")"
+                )));
+            }
+        }
     }
     // Merge with defaults: deserialize directly, missing keys default.
     let cfg: Config = serde_yaml::from_value(parsed)

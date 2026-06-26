@@ -355,3 +355,27 @@ fn config_with_escaping_specs_dir_is_rejected() {
     let err = ludwig::project::Project::open(dir.path()).expect_err("must reject");
     assert!(err.0.contains("specs_dir"), "got: {}", err.0);
 }
+
+/// `canonical:` is a closed enum, so an unknown value is a hard error at load
+/// time rather than a string that silently behaves like neither mode.
+#[test]
+fn config_with_unknown_canonical_is_rejected() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    std::fs::write(dir.path().join("ludwig.yml"), "canonical: coed\n").unwrap();
+    let err = ludwig::project::Project::open(dir.path()).expect_err("must reject");
+    assert!(err.0.contains("canonical"), "got: {}", err.0);
+}
+
+/// Both valid canonical values load and round-trip to the typed enum.
+#[test]
+fn config_accepts_both_canonical_modes() {
+    use ludwig::project::Canonical;
+    for (yaml, expected) in [("canonical: spec\n", Canonical::Spec), ("canonical: code\n", Canonical::Code)] {
+        let dir = TempDir::new("ludwig-test");
+        ludwig::scaffold::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("ludwig.yml"), yaml).unwrap();
+        let p = ludwig::project::Project::open(dir.path()).unwrap();
+        assert_eq!(p.canonical_mode(), expected, "for {yaml:?}");
+    }
+}

@@ -758,6 +758,68 @@ mod tests {
         assert!(detail.contains("cargo` is on PATH"), "got: {detail}");
     }
 
+    /// A spec body carrying a single `{property}` invariant, parameterized by
+    /// status. Property-based generation is deferred (no generator runs yet),
+    /// so the verifier's only job is to react to the spec's status.
+    fn property_only_spec(status: &str) -> String {
+        format!(
+            "---\n\
+             id: prop-policy\n\
+             title: Property policy\n\
+             status: {status}\n\
+             version: 1\n\
+             ---\n\n\
+             ## Intent\n\
+             A spec whose only invariant is a {{property}} one, used to pin the\n\
+             verifier's deferred-property policy independent of any generator.\n\n\
+             ## Behavior\n\
+             - {{#b1}} ident(n) returns n.\n\n\
+             ## Examples\n\
+             ```example name=\"identity\"\n\
+             Given the identity function\n\
+             When ident(7) is called\n\
+             Then it returns 7\n\
+             ```\n\n\
+             ## Invariants\n\
+             - {{property}} ident is the identity for all integers.\n"
+        )
+    }
+
+    /// The property-invariant policy is exercised here directly against
+    /// [`deterministic_checks`] so it does not depend on a cargo run. An
+    /// `active` spec must FAIL on an unverified property invariant (you cannot
+    /// rely on an invariant nothing checked); a non-active spec SKIPs it
+    /// honestly, since the parser never promised to enforce a draft/deprecated
+    /// spec. See spec `property-invariants-deferred`.
+    #[test]
+    fn property_invariant_active_fails_non_active_skips() {
+        let find_property = |checks: &[Check]| -> CheckStatus {
+            checks
+                .iter()
+                .find(|c| c.kind == "property")
+                .unwrap_or_else(|| panic!("expected a property check, got: {checks:#?}"))
+                .status
+        };
+
+        let active = crate::parser::parse(&property_only_spec("active")).unwrap();
+        let active_checks = deterministic_checks(&active, &empty_run(Some(0), ""));
+        assert_eq!(
+            find_property(&active_checks),
+            CheckStatus::Fail,
+            "active spec must FAIL on an unverified property invariant",
+        );
+
+        for status in ["draft", "deprecated"] {
+            let doc = crate::parser::parse(&property_only_spec(status)).unwrap();
+            let checks = deterministic_checks(&doc, &empty_run(Some(0), ""));
+            assert_eq!(
+                find_property(&checks),
+                CheckStatus::Skip,
+                "{status} spec must SKIP the deferred property invariant",
+            );
+        }
+    }
+
     #[test]
     fn excerpt_falls_back_to_tail_when_no_error_lines() {
         let raw = "compiling\nlinking\nsomething odd happened\n";

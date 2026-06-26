@@ -34,9 +34,13 @@ ordered shape:
 
 Four rules govern your interaction with Ludwig:
 
-1. Specs are canonical. When the user asks for behavior, look at the
-   spec first; if the spec is wrong, edit the spec, then regenerate.
-   Never edit generated code without also updating the spec.
+1. The `canonical:` setting in `ludwig.yml` decides the source of truth.
+   In `spec` mode (the default) the spec is canonical: when the user asks
+   for behavior, look at the spec first; if the spec is wrong, edit the
+   spec, then regenerate. Never edit generated code without also updating
+   the spec. In `code` mode the code is canonical (spec-from-code): when a
+   spec and its code diverge, the spec is the stale side — update the spec
+   to match the code, then re-verify.
 
 2. The trailing `ludwig-spec: <id>@<version> hash=<sha>` comment in
    every implementing source file is load-bearing — Ludwig uses it to

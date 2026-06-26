@@ -164,7 +164,7 @@ pub fn report_for_path(project: &Project, path: &Path) -> Result<DriftReport, Pr
         spec_version: doc.version(),
         spec_hash: doc.canonical_hash(),
         stored_hash: doc.stored_hash().map(|s| s.to_string()),
-        canonical_mode: project.canonical_mode().to_string(),
+        canonical_mode: project.canonical_mode().as_str().to_string(),
         files,
     })
 }
@@ -220,11 +220,34 @@ fn file_status(project: &Project, path: &Path, doc: &Document, entry: Option<&Sp
         // version was bumped" — the latter usually means the user already
         // acknowledged a breaking change and the regenerate step is overdue,
         // while the former is unexpected and worth a different warning.
+        //
+        // The *remedy* direction depends on the canonical mode: in `spec` mode
+        // the code is stale and is regenerated from the spec; in `code` mode the
+        // code leads, so a moved spec hash means the spec is the thing to
+        // reconcile and re-verify (which re-stamps the file).
+        let code_mode = project.canonical_mode().is_code();
         let detail = if stamp.version != doc.version() {
+            if code_mode {
+                format!(
+                    "spec was bumped v{} → v{} ({} → {}); code is canonical here — reconcile the spec with the code, then re-verify to re-stamp",
+                    stamp.version,
+                    doc.version(),
+                    short(stamp.hash),
+                    short(&current_hash),
+                )
+            } else {
+                format!(
+                    "spec was bumped v{} → v{} since this file was generated ({} → {}); regenerate to update",
+                    stamp.version,
+                    doc.version(),
+                    short(stamp.hash),
+                    short(&current_hash),
+                )
+            }
+        } else if code_mode {
             format!(
-                "spec was bumped v{} → v{} since this file was generated ({} → {}); regenerate to update",
+                "spec body changed within v{} ({} → {}); code is canonical here — reconcile the spec with the code, then re-verify to re-stamp",
                 stamp.version,
-                doc.version(),
                 short(stamp.hash),
                 short(&current_hash),
             )
@@ -250,10 +273,18 @@ fn file_status(project: &Project, path: &Path, doc: &Document, entry: Option<&Sp
     if let Some(prev) = entry.and_then(|e| e.implementing_files.get(&rel))
         && *prev != body
     {
+        // In `code` mode the edited code is the source of truth, so the spec is
+        // what's now behind; in `spec` mode the edit is a drift away from the
+        // canonical spec.
+        let detail = if project.canonical_mode().is_code() {
+            "code changed since last verify; the spec is now behind — update the spec to match the code, then re-verify"
+        } else {
+            "file body edited since last verify"
+        };
         return FileDrift {
             path: rel,
             status: FileDriftStatus::BodyChanged,
-            detail: Some("file body edited since last verify".to_string()),
+            detail: Some(detail.to_string()),
         };
     }
     FileDrift { path: rel, status: FileDriftStatus::Ok, detail: None }
