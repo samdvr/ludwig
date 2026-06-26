@@ -197,19 +197,23 @@ impl<'a> Verify<'a> {
     /// file-based `ingest_judgments` and the MCP `spec.ingest_judgments` tool,
     /// which receives the verdicts inline as a JSON array.
     pub fn apply_judgments(&self, verdicts: Vec<IngestedVerdict>) -> Result<(), crate::Error> {
-        let mut state = self.project.load_state()?;
-        for v in verdicts {
-            state.judgments.insert(
-                v.invariant_key,
-                crate::project::JudgmentVerdict {
-                    verdict: v.verdict,
-                    rationale: v.rationale,
-                    spec_id: v.spec_id,
-                    spec_hash: v.spec_hash,
-                },
-            );
-        }
-        self.project.write_state(&state)?;
+        // Lock-guarded read-modify-write: load, merge the verdicts, persist —
+        // all under the state lock so a concurrent verify/ingest cannot drop
+        // either side's writes. See `Project::mutate_state`.
+        self.project.mutate_state(|state| {
+            for v in verdicts {
+                state.judgments.insert(
+                    v.invariant_key,
+                    crate::project::JudgmentVerdict {
+                        verdict: v.verdict,
+                        rationale: v.rationale,
+                        spec_id: v.spec_id,
+                        spec_hash: v.spec_hash,
+                    },
+                );
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 

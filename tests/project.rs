@@ -379,3 +379,50 @@ fn config_accepts_both_canonical_modes() {
         assert_eq!(p.canonical_mode(), expected, "for {yaml:?}");
     }
 }
+
+/// R1 regression: `mutate_state` must serialize concurrent read-modify-writes
+/// so no update is lost. Many threads each insert a distinct judgment key under
+/// the lock; afterward every key must be present. With the previous unlocked
+/// load→mutate→write, interleaving would drop most of them (last-writer-wins).
+#[test]
+fn mutate_state_serializes_concurrent_writers() {
+    use ludwig::project::{JudgmentVerdict, Project, Verdict};
+    use std::sync::Arc;
+
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = Arc::new(Project::open(dir.path()).unwrap());
+
+    let n = 16;
+    let handles: Vec<_> = (0..n)
+        .map(|i| {
+            let project = Arc::clone(&project);
+            std::thread::spawn(move || {
+                project
+                    .mutate_state(|state| {
+                        state.judgments.insert(
+                            format!("spec::judgment::{i}"),
+                            JudgmentVerdict {
+                                verdict: Verdict::Pass,
+                                rationale: None,
+                                spec_id: None,
+                                spec_hash: None,
+                            },
+                        );
+                        Ok(())
+                    })
+                    .expect("mutate_state");
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let state = project.load_state().unwrap();
+    assert_eq!(
+        state.judgments.len(),
+        n,
+        "every concurrent writer's verdict must survive — no lost updates"
+    );
+}

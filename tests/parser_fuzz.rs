@@ -165,8 +165,11 @@ prop_compose! {
         ),
     ) -> ValidSpec {
         // Prefix with a letter so the id can never be a YAML keyword (no/yes/null);
-        // quoting in the emitted YAML keeps it a string regardless.
-        let id = format!("s{id_suffix}");
+        // quoting in the emitted YAML keeps it a string regardless. Bracket the
+        // arbitrary middle with alphanumerics so the result is always a valid
+        // kebab slug (>=2 chars, no leading/trailing dash), which the parser now
+        // requires of a spec `id`.
+        let id = format!("s{id_suffix}z");
 
         let mut s = String::new();
         s.push_str("---\n");

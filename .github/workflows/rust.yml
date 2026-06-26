@@ -8,15 +8,57 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Builds and tests resolve exactly the pinned Cargo.lock.
+  CARGO_NET_RETRY: "3"
 
 jobs:
-  build:
-
+  # Lint gate: clippy with warnings as errors.
+  #
+  # NOTE: a `cargo fmt --all -- --check` step is intentionally omitted. The
+  # existing code uses a deliberately compact, hand-tuned style that default
+  # rustfmt would rewrite across ~all files. Add a `rustfmt.toml` capturing the
+  # house style and then enable a fmt gate as a separate, focused change.
+  lint:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  # Build + test on Linux and Windows. Windows is included because the code
+  # makes platform-specific path and atomic-rename claims (see the audit) and
+  # the `id`/path-confinement behavior must be exercised there too.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --locked --verbose
+      - name: Run tests
+        run: cargo test --locked --verbose
+
+  # Enforce the declared MSRV (Cargo.toml `rust-version`).
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Build on MSRV
+        run: cargo build --locked --verbose
+
+  # Supply-chain: fail on a dependency with a known advisory.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

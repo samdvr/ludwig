@@ -86,6 +86,20 @@ impl Frontmatter {
         }
 
         let id = require_string(&entries, "id", source)?;
+        // The `id` is interpolated into filesystem paths (generated test file,
+        // cache snapshot) and the judgment-key namespace. Validate its shape at
+        // the parse boundary — the single trust boundary for specs that arrive
+        // hand-written or persisted by an older binary — so a `..`, an absolute
+        // path, or other separators can never reach those paths. See `is_valid_slug`.
+        if !crate::util::is_valid_slug(&id) {
+            return Err(ParseError::at(
+                source,
+                format!(
+                    "frontmatter `id` must be a kebab-case slug (lowercase letters, digits, \
+                     and dashes; `/` allowed for sub-games): {id:?}"
+                ),
+            ));
+        }
         let title = require_string(&entries, "title", source)?;
         let status_str = require_string(&entries, "status", source)?;
         let status = Status::parse(&status_str).ok_or_else(|| {

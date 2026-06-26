@@ -252,6 +252,47 @@ impl Project {
             .map_err(|e| ProjectError::new(format!("{} is not valid JSON: {e}", path.display())))
     }
 
+    /// Run a read-modify-write of the project state under an exclusive advisory
+    /// lock, then persist the result. The lock serializes the whole RMW so two
+    /// concurrent processes (e.g. parallel `ludwig verify` runs, or a `verify`
+    /// racing an `ingest-judgments`) cannot clobber each other's recorded
+    /// hashes, fingerprints, or judgment verdicts. [`write_state`]'s atomic
+    /// rename prevents a *torn* file but not a *lost update*; this closes that
+    /// gap. The lock lives on a dedicated `state.lock` so it never contends with
+    /// readers of `state.json` itself, and is released when `f` returns (or on
+    /// error, or when the process dies and the OS drops the file).
+    pub fn mutate_state<F, T>(&self, f: F) -> Result<T, ProjectError>
+    where
+        F: FnOnce(&mut State) -> Result<T, ProjectError>,
+    {
+        let dir = self.state_dir();
+        fs::create_dir_all(&dir)
+            .map_err(|e| ProjectError::new(format!("mkdir {}: {e}", dir.display())))?;
+        let lock_path = dir.join("state.lock");
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| ProjectError::new(format!("open {}: {e}", lock_path.display())))?;
+        // Everything below runs under the exclusive lock. `File::lock` /
+        // `File::unlock` are std's own advisory file locks (flock(2) on Unix,
+        // LockFileEx on Windows) — no third-party dependency. They block until
+        // the lock is acquired.
+        lock_file
+            .lock()
+            .map_err(|e| ProjectError::new(format!("lock {}: {e}", lock_path.display())))?;
+        let result = (|| {
+            let mut state = self.load_state()?;
+            let value = f(&mut state)?;
+            self.write_state(&state)?;
+            Ok(value)
+        })();
+        // Release explicitly; dropping `lock_file` would also release it.
+        let _ = lock_file.unlock();
+        result
+    }
+
     pub fn write_state(&self, state: &State) -> Result<(), ProjectError> {
         let dir = self.state_dir();
         fs::create_dir_all(&dir)

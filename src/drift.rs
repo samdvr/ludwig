@@ -301,7 +301,6 @@ fn body_sha_from_str(content: &str) -> Option<String> {
 /// snapshot the spec's canonical body into `.ludwig/cache/<id>@<version>.md`
 /// so future runs can show a meaningful diff between historical versions.
 pub fn record(project: &Project, doc: &Document, files: &[PathBuf]) -> Result<(), ProjectError> {
-    let mut state = project.load_state()?;
     let mut implementing_files: BTreeMap<String, String> = BTreeMap::new();
     for path in files {
         if let Some(sha) = body_sha(path) {
@@ -313,15 +312,19 @@ pub fn record(project: &Project, doc: &Document, files: &[PathBuf]) -> Result<()
             implementing_files.insert(rel, sha);
         }
     }
-    state.specs.insert(
-        doc.id().to_string(),
-        SpecState {
-            version: doc.version(),
-            hash: doc.canonical_hash(),
-            implementing_files,
-        },
-    );
-    project.write_state(&state)?;
+    // Lock-guarded read-modify-write so a concurrent verify/ingest can't clobber
+    // this spec's recorded state (or have its own clobbered). See `mutate_state`.
+    project.mutate_state(|state| {
+        state.specs.insert(
+            doc.id().to_string(),
+            SpecState {
+                version: doc.version(),
+                hash: doc.canonical_hash(),
+                implementing_files: std::mem::take(&mut implementing_files),
+            },
+        );
+        Ok(())
+    })?;
     cache_canonical_body(project, doc)?;
     Ok(())
 }

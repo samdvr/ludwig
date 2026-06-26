@@ -23,6 +23,7 @@ pub const GITIGNORE_LINES: &str = "\
 /.ludwig/cache/
 /.ludwig/pending/
 /.ludwig/reports/
+/.ludwig/state.lock
 ";
 
 /// Initialize a Ludwig project. Idempotent. Returns the list of paths that were created
@@ -345,9 +346,7 @@ pub fn move_spec(
 }
 
 pub fn validate_slug(slug: &str) -> Result<(), ProjectError> {
-    static RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9\-/]*[a-z0-9]$").unwrap());
-    if !RE.is_match(slug) {
+    if !crate::util::is_valid_slug(slug) {
         return Err(ProjectError::new(format!(
             "slug must be kebab-case (lowercase, digits, dashes; slashes allowed for sub-games): {slug:?}"
         )));

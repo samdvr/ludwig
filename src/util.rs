@@ -1,9 +1,28 @@
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use crate::plan;
 use crate::project::Project;
+
+/// A kebab-case slug: lowercase letters/digits separated by dashes, with `/`
+/// permitted so sub-game ids (`auth/login`) round-trip. The single source of
+/// truth shared by `scaffold::validate_slug` (which validates user-supplied
+/// slugs) and the parser (which now validates a spec's frontmatter `id`).
+static SLUG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9\-/]*[a-z0-9]$").unwrap());
+
+/// Return `true` if `s` is a well-formed kebab-case slug. A spec's `id` flows
+/// into filesystem paths (the generated `tests/ludwig_<id>.rs`, the cache file
+/// `.ludwig/cache/<id>@<v>.md`) and the judgment-key namespace, so validating
+/// its shape at the parse boundary keeps a hand-authored or older-binary spec
+/// from smuggling path separators, `..`, or other surprises into those paths.
+pub fn is_valid_slug(s: &str) -> bool {
+    SLUG_RE.is_match(s)
+}
 
 /// Return `true` if `pat` would resolve outside the project root: an absolute
 /// path, a drive/UNC prefix, or any path containing a `..` (parent-dir)

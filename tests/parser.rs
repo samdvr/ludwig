@@ -449,3 +449,77 @@ Then it works
     // A legitimate in-tree pattern still parses.
     ludwig::parser::parse(&template("src/lib.rs")).expect("in-tree implements must parse");
 }
+
+// -- golden canonical hash (D2: detect serializer/format drift) --------------
+
+/// A frozen spec literal whose canonical hash is pinned below. The canonical
+/// hash is persisted in file stamps and `state.json`, so if the serialization
+/// of the canonical body ever changes — e.g. a `serde_yaml` upgrade alters
+/// frontmatter quoting/spacing — every stamp in the wild would silently
+/// invalidate and report mass drift. This golden value makes that a loud test
+/// failure instead. If you intentionally change the canonical form, bump the
+/// pinned hash here in the same commit.
+const GOLDEN_SPEC: &str = "---\n\
+id: golden-fixture\n\
+title: Golden fixture\n\
+status: active\n\
+owners: []\n\
+implements: []\n\
+depends_on: []\n\
+version: 1\n\
+---\n\n\
+## Intent\n\
+A frozen specification used purely to pin the canonical hashing format so a\n\
+dependency upgrade cannot silently change every stamp in existing projects.\n\
+There is no behavior here beyond being stable.\n\n\
+## Behavior\n\
+- {#b1} It exists and never changes.\n\n\
+## Examples\n\
+```example name=\"trivial\"\n\
+Given the golden fixture\n\
+When it is hashed\n\
+Then the hash equals the pinned value\n\
+```\n\n\
+## Invariants\n\
+- {deterministic} The canonical hash equals the pinned constant.\n";
+
+#[test]
+fn golden_canonical_hash_is_pinned() {
+    let doc = ludwig::parser::parse(GOLDEN_SPEC).expect("golden spec parses");
+    assert_eq!(
+        doc.canonical_hash(),
+        "91358482e1abffa17ab113cfbe84fd1a7e1c72f6f97abefa7f88ca15d5369243"
+    );
+}
+
+#[test]
+fn rejects_invalid_frontmatter_id() {
+    // S2: a spec `id` flows into filesystem paths, so the parser must reject a
+    // non-slug id (here one containing `..` and a backslash) rather than carry
+    // it through to `tests/ludwig_<id>.rs` / the cache path.
+    let spec = "---\n\
+id: \"../../evil\"\n\
+title: Bad id\n\
+status: draft\n\
+version: 1\n\
+---\n\n\
+## Intent\n\
+A spec whose frontmatter id is not a valid kebab-case slug; the parser must\n\
+reject it at validation time before the id can reach any filesystem path.\n\n\
+## Behavior\n\
+- {#b1} It should never parse.\n\n\
+## Examples\n\
+```example name=\"x\"\n\
+Given a bad id\n\
+When parsed\n\
+Then it is rejected\n\
+```\n\n\
+## Invariants\n\
+- {deterministic} Parsing fails.\n";
+    let err = ludwig::parser::parse(spec).expect_err("invalid id must be rejected");
+    assert!(
+        err.message.contains("id") && err.message.contains("kebab"),
+        "error should name the id rule, got: {}",
+        err.message
+    );
+}

@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 36422a6ea72a4b69fc91cf79b24fe98c96877f106b3fa49cef4a4be8514cae44 # shrinks to spec = ValidSpec { text: "---\nid: \"s\"\ntitle: \"0\"\nstatus: draft\nversion: 1\n---\n\n## Intent\na a a a a a a a a a a a a a a a a a a a\n\n## Behavior\n- a\n\n## Examples\n```example name=\"ex 0 sample\"\nGiven a\nWhen a\nThen a\n```\n\n## Invariants\n- {deterministic} a\n", id: "s", n_behaviors: 1, n_examples: 1, n_invariants: 1 }
+cc c68424976174a2e6180d4f8f682f5bde18469051425effac79a5056390f2ac3b # shrinks to spec = ValidSpec { text: "---\nid: \"s\"\ntitle: \" \"\nstatus: draft\nversion: 1\n---\n\n## Intent\na a a a a a a a a a a a a a a a a a a a\n\n## Behavior\n- a\n\n## Examples\n```example name=\"ex 0 sample\"\nGiven a\nWhen a\nThen a\n```\n\n## Invariants\n- {deterministic} a\n", id: "s", n_behaviors: 1, n_examples: 1, n_invariants: 1 }
+cc 8d03234855e2d1af495a0cb4f6c223e6e88727d7f8d317449f475b3b4ccb5502 # shrinks to spec = ValidSpec { text: "---\nid: \"s\"\ntitle: \"a\"\nstatus: draft\nversion: 1\n---\n\n## Intent\na a a a a a a a a a a a a a a a a a a a\n\n## Behavior\n- a\n\n## Examples\n```example name=\"ex 0 sample\"\nGiven a\nWhen a\nThen a\n```\n\n## Invariants\n- {deterministic} a\n", id: "s", n_behaviors: 1, n_examples: 1, n_invariants: 1 }

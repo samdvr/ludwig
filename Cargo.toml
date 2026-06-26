@@ -2,6 +2,9 @@
 name = "ludwig"
 version = "0.1.0"
 edition = "2024"
+# Pinned MSRV: edition 2024 needs >=1.85, and `Project::mutate_state` uses
+# std's `File::lock`/`unlock` (stabilized in 1.89). CI builds against this.
+rust-version = "1.89"
 description = "Specification-driven development framework for LLM coding agents."
 license = "MIT"
 
