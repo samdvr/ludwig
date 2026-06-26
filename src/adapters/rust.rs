@@ -193,6 +193,10 @@ pub(crate) fn invariant_test_name(idx: usize) -> String {
     format!("test_deterministic_invariant_{}", idx + 1)
 }
 
+pub(crate) fn property_test_name(idx: usize) -> String {
+    format!("test_property_invariant_{}", idx + 1)
+}
+
 fn keyword_label(k: GherkinKeyword) -> &'static str {
     match k {
         GherkinKeyword::Given => "Given",
@@ -240,6 +244,23 @@ fn render_scaffold(doc: &Document) -> String {
         out.push_str(&format!("fn {test_fn}() {{\n"));
         out.push_str(&format!(
             "    todo!(\"implement invariant: {}\");\n",
+            escape_rust_string(&inv.text)
+        ));
+        out.push_str("}\n\n");
+    }
+
+    for (idx, inv) in doc.property_invariants().enumerate() {
+        let test_fn = property_test_name(idx);
+        out.push_str(&format!("/// {{property}} {}\n", inv.text));
+        out.push_str(
+            "/// Universally quantified: this must hold for *all* inputs, not one case.\n\
+             /// Drive it with many generated inputs — a `proptest!` / `quickcheck` block,\n\
+             /// or a loop over a wide range — so the property is actually exercised.\n",
+        );
+        out.push_str("#[test]\n");
+        out.push_str(&format!("fn {test_fn}() {{\n"));
+        out.push_str(&format!(
+            "    todo!(\"implement property invariant: {}\");\n",
             escape_rust_string(&inv.text)
         ));
         out.push_str("}\n\n");

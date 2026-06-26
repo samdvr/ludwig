@@ -207,9 +207,11 @@ fn render_updates_stale_stamp_in_existing_test_file() {
 }
 
 #[test]
-fn property_invariant_fails_on_active_spec() {
-    // bug 3: an `active` spec with only property invariants used to pass
-    // (every property check was `skip`, summary.fail == 0). It must now fail.
+fn property_invariant_machine_verified_on_active_spec() {
+    // Property invariants are machine-verified like deterministic ones: the
+    // adapter scaffolds a `test_property_invariant_*` test and the verifier folds
+    // its real cargo verdict into a `property` check. A passing property test lets
+    // an active spec rely on the invariant; a missing one fails loudly.
     let dir = TempDir::new("ludwig-test");
     let root = dir.path();
     std::fs::write(
@@ -238,9 +240,9 @@ version: 1
 ---
 
 ## Intent
-A spec that asserts only a {property} invariant. Until property-based
-generation lands, an active spec must not be allowed to silently pass
-just because its checks were skipped.
+A spec that asserts a {property} invariant. With property-based generation
+landed, an active spec is allowed to rely on it once a backing property test
+passes — and must fail while that test is missing.
 
 ## Behavior
 - {#b1} ident(n) returns n.
@@ -272,6 +274,10 @@ Then it returns 7
     let adapter = ludwig::adapters::for_project(&project);
     use ludwig::adapters::Adapter;
     let info = adapter.render(&doc).unwrap();
+
+    // First: a test file with the example but NO property test. The missing
+    // property test must fail — an active spec cannot pass on an unexercised
+    // property.
     std::fs::write(
         &info.spec_file,
         format!(
@@ -286,21 +292,61 @@ Then it returns 7
     )
     .unwrap();
 
-
-    // Auto-isolated nested target (see spec `verify-isolates-nested-cargo`).
-
     let v = ludwig::verify::Verify::new(&project);
     let report = v.run("prop-only", Default::default()).unwrap();
     assert!(
         report.summary.fail >= 1,
-        "active spec with only property invariants must fail: {:#?}",
+        "active spec with a missing property test must fail: {:#?}",
         report.checks
     );
     let property_fail = report
         .checks
         .iter()
         .any(|c| c.kind == "property" && c.status == ludwig::verify::CheckStatus::Fail);
-    assert!(property_fail, "property check must report fail on active");
+    assert!(
+        property_fail,
+        "missing property test must report a failing property check: {:#?}",
+        report.checks
+    );
+
+    // Now: add a passing property test (quantified over a wide range of inputs).
+    // The property check must flip to pass and the spec rely on the invariant.
+    std::fs::write(
+        &info.spec_file,
+        format!(
+            "// ludwig-spec: {}@{} hash={}\n\n\
+            use prop_target::ident;\n\n\
+            #[test]\n\
+            fn test_example_identity() {{\n    assert_eq!(ident(7), 7);\n}}\n\n\
+            #[test]\n\
+            fn test_property_invariant_1() {{\n    \
+                for n in -10_000i64..=10_000 {{\n        assert_eq!(ident(n), n);\n    }}\n}}\n",
+            doc.id(),
+            doc.version(),
+            doc.canonical_hash()
+        ),
+    )
+    .unwrap();
+
+    let report = v.run("prop-only", Default::default()).unwrap();
+    let property_pass = report
+        .checks
+        .iter()
+        .any(|c| c.kind == "property" && c.status == ludwig::verify::CheckStatus::Pass);
+    assert!(
+        property_pass,
+        "a passing property test must report a passing property check: {:#?}",
+        report.checks
+    );
+    let property_fail = report
+        .checks
+        .iter()
+        .any(|c| c.kind == "property" && c.status == ludwig::verify::CheckStatus::Fail);
+    assert!(
+        !property_fail,
+        "no property check should fail once the property test passes: {:#?}",
+        report.checks
+    );
 }
 
 #[test]

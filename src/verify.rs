@@ -159,7 +159,7 @@ impl<'a> Verify<'a> {
             &doc,
         ));
         let run_result = adapter.run(&doc)?;
-        checks.extend(deterministic_checks(&doc, &run_result));
+        checks.extend(deterministic_checks(&run_result));
         checks.extend(missing_test_checks(&doc, &run_result));
 
         checks.extend(self.judgment_check_stubs(&judgment_prompts)?);
@@ -449,22 +449,24 @@ fn compiler_error_excerpt(raw: &str) -> String {
     truncate(chosen.join("\n").trim(), 1200)
 }
 
-fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec<Check> {
+fn deterministic_checks(run: &crate::adapters::RunResult) -> Vec<Check> {
     let mut out: Vec<Check> = Vec::new();
     for t in &run.tests {
-        let kind = if t.name.starts_with("test_example_") {
-            "example"
-        } else {
-            "invariant"
-        };
-        let name = t
-            .name
-            .strip_prefix("test_example_")
-            .or_else(|| t.name.strip_prefix("test_deterministic_invariant_"))
-            .unwrap_or(&t.name)
-            .replace('_', " ")
-            .trim()
-            .to_string();
+        // Route each generated test to its check kind. Property-invariant tests
+        // (`test_property_invariant_*`) are real machine verification now — a
+        // generated property test, quantified over many inputs — so they report
+        // under the `property` kind rather than being failed as "deferred".
+        let (check_kind, item_kind, stripped) =
+            if let Some(rest) = t.name.strip_prefix("test_example_") {
+                ("deterministic", "example", rest)
+            } else if let Some(rest) = t.name.strip_prefix("test_property_invariant_") {
+                ("property", "property", rest)
+            } else if let Some(rest) = t.name.strip_prefix("test_deterministic_invariant_") {
+                ("deterministic", "invariant", rest)
+            } else {
+                ("deterministic", "invariant", t.name.as_str())
+            };
+        let name = stripped.replace('_', " ").trim().to_string();
         let status = match t.status {
             TestStatus::Pass => CheckStatus::Pass,
             TestStatus::Fail => CheckStatus::Fail,
@@ -476,8 +478,8 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
             TestStatus::Pass => None,
         };
         out.push(Check::new(
-            "deterministic",
-            format!("{kind}:{name}"),
+            check_kind,
+            format!("{item_kind}:{name}"),
             status,
             detail,
         ));
@@ -505,32 +507,11 @@ fn deterministic_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec
             Some(detail),
         ));
     }
-    // Property invariants are parsed but not yet machine-verified. For an active
-    // spec we must fail loudly — otherwise the verifier silently green-lights
-    // claims it never checked. For draft / deprecated specs the parser has
-    // already declined to enforce "verified", so a `skip` is honest.
-    let active = doc.frontmatter.is_active();
-    for inv in doc.property_invariants() {
-        let (status, detail) = if active {
-            (
-                CheckStatus::Fail,
-                "property invariants are not yet machine-verified (deferred to v0.2). \
-                 An `active` spec cannot rely on unverified invariants — move to draft, \
-                 rewrite the invariant as {deterministic}, or downgrade it to {judgment}.",
-            )
-        } else {
-            (
-                CheckStatus::Skip,
-                "property-based generation deferred to v0.2; skipped on non-active spec",
-            )
-        };
-        out.push(Check::new(
-            "property",
-            truncate(&inv.text, 60),
-            status,
-            Some(detail.into()),
-        ));
-    }
+    // Property invariants are now machine-verified like deterministic ones: the
+    // adapter scaffolds a `test_property_invariant_*` test the author fills in,
+    // its run result is folded into `checks` above under the `property` kind, and
+    // `missing_test_checks` fails loudly if the test is absent. There is nothing
+    // status-dependent to add here.
     out
 }
 
@@ -566,6 +547,20 @@ fn missing_test_checks(doc: &Document, run: &crate::adapters::RunResult) -> Vec<
                 CheckStatus::Fail,
                 Some(format!(
                     "no `fn {expected}` in tests/ludwig_<slug>.rs; add a #[test] for this invariant"
+                )),
+            ));
+        }
+    }
+    for (idx, inv) in doc.property_invariants().enumerate() {
+        let expected = crate::adapters::rust::property_test_name(idx);
+        if !actual.contains(expected.as_str()) {
+            out.push(Check::new(
+                "property",
+                format!("property:{} (missing)", truncate(&inv.text, 40)),
+                CheckStatus::Fail,
+                Some(format!(
+                    "no `fn {expected}` in tests/ludwig_<slug>.rs; add a property #[test] \
+                     (quantified over many inputs) for this invariant"
                 )),
             ));
         }
@@ -693,11 +688,6 @@ mod tests {
         assert!(serde_json::from_str::<Verdict>("\"maybe\"").is_err());
     }
 
-    const MINIMAL_SPEC: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/specs/valid/minimal.spec.md"
-    ));
-
     fn empty_run(exit_code: Option<i32>, raw: &str) -> RunResult {
         RunResult {
             tests: Vec::new(),
@@ -714,9 +704,8 @@ mod tests {
     /// "is cargo on PATH?" hint.
     #[test]
     fn empty_tests_with_nonzero_exit_surfaces_compiler_output() {
-        let doc = crate::parser::parse(MINIMAL_SPEC).unwrap();
         let raw = "error[E0425]: cannot find value `foo`\n --> tests/ludwig_hello.rs:3:5\n";
-        let checks = deterministic_checks(&doc, &empty_run(Some(101), raw));
+        let checks = deterministic_checks(&empty_run(Some(101), raw));
         let runner = checks
             .iter()
             .find(|c| c.name == "test-runner")
@@ -735,8 +724,7 @@ mod tests {
     /// zero exit with no tests keeps the generic "nothing ran" hint.
     #[test]
     fn empty_tests_with_zero_exit_uses_generic_hint() {
-        let doc = crate::parser::parse(MINIMAL_SPEC).unwrap();
-        let checks = deterministic_checks(&doc, &empty_run(Some(0), ""));
+        let checks = deterministic_checks(&empty_run(Some(0), ""));
         let runner = checks
             .iter()
             .find(|c| c.name == "test-runner")
@@ -745,66 +733,78 @@ mod tests {
         assert!(detail.contains("cargo` is on PATH"), "got: {detail}");
     }
 
-    /// A spec body carrying a single `{property}` invariant, parameterized by
-    /// status. Property-based generation is deferred (no generator runs yet),
-    /// so the verifier's only job is to react to the spec's status.
-    fn property_only_spec(status: &str) -> String {
-        format!(
-            "---\n\
-             id: prop-policy\n\
-             title: Property policy\n\
-             status: {status}\n\
-             version: 1\n\
-             ---\n\n\
-             ## Intent\n\
-             A spec whose only invariant is a {{property}} one, used to pin the\n\
-             verifier's deferred-property policy independent of any generator.\n\n\
-             ## Behavior\n\
-             - {{#b1}} ident(n) returns n.\n\n\
-             ## Examples\n\
-             ```example name=\"identity\"\n\
-             Given the identity function\n\
-             When ident(7) is called\n\
-             Then it returns 7\n\
-             ```\n\n\
-             ## Invariants\n\
-             - {{property}} ident is the identity for all integers.\n"
-        )
+    /// A spec body carrying a single `{property}` invariant. Property invariants
+    /// are machine-verified by a generated `test_property_invariant_*` test, so
+    /// this fixture drives the property-check routing and the missing-test guard.
+    fn property_only_spec() -> String {
+        "---\n\
+         id: prop-policy\n\
+         title: Property policy\n\
+         status: active\n\
+         version: 1\n\
+         ---\n\n\
+         ## Intent\n\
+         A spec whose only invariant is a {property} one, used to pin how the\n\
+         verifier routes a generated property test's result to a property check.\n\n\
+         ## Behavior\n\
+         - {#b1} ident(n) returns n.\n\n\
+         ## Examples\n\
+         ```example name=\"identity\"\n\
+         Given the identity function\n\
+         When ident(7) is called\n\
+         Then it returns 7\n\
+         ```\n\n\
+         ## Invariants\n\
+         - {property} ident is the identity for all integers.\n"
+            .to_string()
     }
 
-    /// The property-invariant policy is exercised here directly against
-    /// [`deterministic_checks`] so it does not depend on a cargo run. An
-    /// `active` spec must FAIL on an unverified property invariant (you cannot
-    /// rely on an invariant nothing checked); a non-active spec SKIPs it
-    /// honestly, since the parser never promised to enforce a draft/deprecated
-    /// spec. See spec `property-invariants-deferred`.
+    /// A generated property test's cargo verdict is routed to the `property`
+    /// check kind and reported as-is — a passing property test passes, a failing
+    /// one fails. An active spec can therefore rely on a `{property}` invariant
+    /// exactly as it relies on a `{deterministic}` one. See spec
+    /// `property-invariants-verified`.
     #[test]
-    fn property_invariant_active_fails_non_active_skips() {
-        let find_property = |checks: &[Check]| -> CheckStatus {
-            checks
+    fn property_invariant_test_result_routes_to_property_check() {
+        let run = |status| RunResult {
+            tests: vec![crate::adapters::TestResult {
+                name: "test_property_invariant_1".into(),
+                status,
+            }],
+            pass: 0,
+            fail: 0,
+            skip: 0,
+            exit_code: Some(0),
+            raw: String::new(),
+        };
+        for (ts, expected) in [
+            (TestStatus::Pass, CheckStatus::Pass),
+            (TestStatus::Fail, CheckStatus::Fail),
+        ] {
+            let checks = deterministic_checks(&run(ts));
+            let prop = checks
                 .iter()
                 .find(|c| c.kind == "property")
-                .unwrap_or_else(|| panic!("expected a property check, got: {checks:#?}"))
-                .status
-        };
-
-        let active = crate::parser::parse(&property_only_spec("active")).unwrap();
-        let active_checks = deterministic_checks(&active, &empty_run(Some(0), ""));
-        assert_eq!(
-            find_property(&active_checks),
-            CheckStatus::Fail,
-            "active spec must FAIL on an unverified property invariant",
-        );
-
-        for status in ["draft", "deprecated"] {
-            let doc = crate::parser::parse(&property_only_spec(status)).unwrap();
-            let checks = deterministic_checks(&doc, &empty_run(Some(0), ""));
+                .unwrap_or_else(|| panic!("expected a property check, got: {checks:#?}"));
             assert_eq!(
-                find_property(&checks),
-                CheckStatus::Skip,
-                "{status} spec must SKIP the deferred property invariant",
+                prop.status, expected,
+                "property test verdict {ts:?} must map to the property check status",
             );
         }
+    }
+
+    /// An active spec whose `{property}` invariant has no backing test must still
+    /// fail: `missing_test_checks` emits a failing `property` check, so the spec
+    /// can never silently pass on a property nothing exercised.
+    #[test]
+    fn missing_property_test_fails_loudly() {
+        let doc = crate::parser::parse(&property_only_spec()).unwrap();
+        let checks = missing_test_checks(&doc, &empty_run(Some(0), ""));
+        let prop = checks
+            .iter()
+            .find(|c| c.kind == "property")
+            .unwrap_or_else(|| panic!("expected a missing-property check, got: {checks:#?}"));
+        assert_eq!(prop.status, CheckStatus::Fail);
     }
 
     #[test]

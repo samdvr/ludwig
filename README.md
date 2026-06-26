@@ -99,22 +99,24 @@ file is load-bearing — don't hand-edit it.
 1. **Structural** — frontmatter is well-typed, sections are in order, behavior
    tags are unique, every file in `implements:` exists and carries a matching
    `ludwig-spec:` stamp. In-process Rust. Sub-second.
-2. **Deterministic** — Ludwig scaffolds `tests/ludwig_<slug>.rs` with one
-   `#[test]` per Example and per `{deterministic}` invariant, each containing
-   a `todo!()` body and a doc-comment with the Gherkin steps. You replace the
-   bodies. `ludwig verify` shells out to `cargo test --test ludwig_<slug>` and
-   parses the results.
+2. **Deterministic & property** — Ludwig scaffolds `tests/ludwig_<slug>.rs` with
+   one `#[test]` per Example, per `{deterministic}` invariant, and per
+   `{property}` invariant, each containing a `todo!()` body and a doc-comment
+   with the Gherkin steps. Property stubs carry a hint to quantify over many
+   generated inputs (a `proptest!`/`quickcheck` block or a wide loop). You
+   replace the bodies. `ludwig verify` shells out to
+   `cargo test --test ludwig_<slug>` and parses the results.
 3. **Judgment** — each `{judgment}` invariant is packaged as a prompt and
    emitted as JSON. Ludwig itself holds no API keys; the host agent (Claude
    Code) evaluates each prompt and writes verdicts back via
    `ludwig verify --ingest-judgments <file>`. Verdicts are keyed by the spec
    hash, so changing the spec invalidates old verdicts automatically.
 
-`{property}` invariants are parsed but not yet machine-verified — no generator
-runs. Rather than silently pass, Ludwig reacts to the spec's status: on an
-`active` spec each property invariant reports `fail` (you can't rely on an
-invariant nothing checked), and on a draft/deprecated spec it reports `skip`.
-See `docs/specs/property-invariants-deferred.spec.md`.
+A `{property}` invariant is machine-verified the same way a `{deterministic}`
+one is: Ludwig scaffolds a `test_property_invariant_<n>` test (quantified over
+many inputs), runs it, and reports the real verdict. A missing property test
+fails loudly — an `active` spec can rely on a property invariant only once its
+backing test passes. See `docs/specs/property-invariants-verified.spec.md`.
 
 ### Canonical direction
 
