@@ -2,7 +2,7 @@
 name = "ludwig"
 version = "0.1.0"
 edition = "2024"
-description = "Specification-driven development framework for LLM coding agents (Rust port)."
+description = "Specification-driven development framework for LLM coding agents."
 license = "MIT"
 
 [[bin]]
@@ -30,4 +30,3 @@ indexmap = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
-
