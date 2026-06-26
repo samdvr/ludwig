@@ -67,13 +67,10 @@ impl Game {
             _ => Vec::new(),
         };
         let glossary = parse_glossary(&body);
-        let rel = manifest_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .strip_prefix(&project.root)
-            .unwrap_or_else(|_| Path::new("."))
-            .to_string_lossy()
-            .into_owned();
+        let rel = crate::util::rel_str(
+            &project.root,
+            manifest_path.parent().unwrap_or(Path::new(".")),
+        );
         Ok(Self { name, path: rel, glossary, inherits })
     }
 

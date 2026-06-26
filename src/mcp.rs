@@ -408,11 +408,7 @@ impl Server {
         for path in project.spec_paths() {
             match parser::parse_file(&path) {
                 Ok(doc) => {
-                    let rel = path
-                        .strip_prefix(&project.root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .into_owned();
+                    let rel = crate::util::rel_str(&project.root, &path);
                     out.push(json!({
                         "id": doc.id(),
                         "title": doc.frontmatter.title,
@@ -422,11 +418,7 @@ impl Server {
                     }));
                 }
                 Err(e) => {
-                    let rel = path
-                        .strip_prefix(&project.root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .into_owned();
+                    let rel = crate::util::rel_str(&project.root, &path);
                     out.push(json!({
                         "path": rel,
                         "error": e.message,
@@ -448,11 +440,7 @@ impl Server {
             code: -32603,
             message: e.message,
         })?;
-        let rel = path
-            .strip_prefix(&project.root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
+        let rel = crate::util::rel_str(&project.root, &path);
         // Mirror the shape of `plan::SpecBrief` so MCP callers don't have to
         // special-case the two tools. Avoids the cost of full dependency
         // resolution and file fingerprints that `plan::brief_for` performs.
@@ -548,11 +536,7 @@ impl Server {
         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
         match scaffold::move_spec(&project, slug, to_game, force) {
             Ok(target) => {
-                let rel = target
-                    .strip_prefix(&project.root)
-                    .unwrap_or(&target)
-                    .to_string_lossy()
-                    .into_owned();
+                let rel = crate::util::rel_str(&project.root, &target);
                 Ok(json!({ "ok": true, "path": rel }))
             }
             Err(e) => Ok(json!({ "ok": false, "error": e.0 })),
@@ -587,11 +571,7 @@ impl Server {
         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
         match scaffold::write_spec(&project, slug, content, game, force) {
             Ok(target) => {
-                let rel = target
-                    .strip_prefix(&project.root)
-                    .unwrap_or(&target)
-                    .to_string_lossy()
-                    .into_owned();
+                let rel = crate::util::rel_str(&project.root, &target);
                 Ok(json!({
                     "ok": true,
                     "path": rel,
@@ -642,11 +622,7 @@ impl Server {
         };
         match scaffold::create_game(&project, name, intent, &glossary_pairs, force) {
             Ok(target) => {
-                let rel = target
-                    .strip_prefix(&project.root)
-                    .unwrap_or(&target)
-                    .to_string_lossy()
-                    .into_owned();
+                let rel = crate::util::rel_str(&project.root, &target);
                 Ok(json!({ "ok": true, "path": rel }))
             }
             Err(e) => Ok(json!({ "ok": false, "error": e.0 })),

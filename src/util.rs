@@ -39,6 +39,23 @@ pub fn pattern_escapes_root(pat: &str) -> bool {
     })
 }
 
+/// Render `path` as a project-root-relative string using forward slashes on
+/// every platform. Root-relative paths are part of the JSON contract surfaced
+/// over MCP (`spec.list`/`read`/`diff`/`plan`/`verify`, etc.) and persisted in
+/// reports and `state.json`; without this, Windows would emit backslashes and
+/// diverge from the cross-platform contract that clients — and the project's
+/// own `state.json` fingerprints — assume. Falls back to the full path when it
+/// is not under `root`.
+pub fn rel_str(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let s = rel.to_string_lossy().into_owned();
+    // Only Windows uses a non-`/` separator; on Unix a literal backslash is a
+    // legal filename character and must be left untouched.
+    #[cfg(windows)]
+    let s = s.replace('\\', "/");
+    s
+}
+
 /// Hex-encode a byte slice — used wherever Ludwig prints or persists a SHA-256
 /// digest (spec hash, file fingerprint, body sha). Keeps one definition so the
 /// digest format can't drift across modules.

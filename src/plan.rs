@@ -110,11 +110,7 @@ pub fn brief_for_path(project: &Project, path: &std::path::Path) -> Result<Brief
     let game = Game::for_spec(project, path);
     let deps = resolve_dependencies(project, &doc.frontmatter.depends_on);
 
-    let rel_path = path
-        .strip_prefix(&project.root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned();
+    let rel_path = crate::util::rel_str(&project.root, path);
 
     let spec = SpecBrief {
         id: doc.id().to_string(),
@@ -194,11 +190,7 @@ fn resolve_dependencies(project: &Project, start: &[String]) -> Vec<DependencyEn
                 );
             }
             Some((p, dep_doc)) => {
-                let rel = p
-                    .strip_prefix(&project.root)
-                    .unwrap_or(&p)
-                    .to_string_lossy()
-                    .into_owned();
+                let rel = crate::util::rel_str(&project.root, &p);
                 seen.insert(
                     dep_id.clone(),
                     DependencyEntry {
@@ -244,11 +236,7 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
                 hasher.update(&bytes);
                 let digest = hasher.finalize();
                 out.push(FileFingerprint {
-                    path: full
-                        .strip_prefix(&project.root)
-                        .unwrap_or(&full)
-                        .to_string_lossy()
-                        .into_owned(),
+                    path: crate::util::rel_str(&project.root, &full),
                     size: meta.len(),
                     sha256: crate::util::hex(&digest),
                 });
@@ -263,11 +251,7 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
                     hasher.update(&bytes);
                     let digest = hasher.finalize();
                     out.push(FileFingerprint {
-                        path: matched
-                            .strip_prefix(&project.root)
-                            .unwrap_or(&matched)
-                            .to_string_lossy()
-                            .into_owned(),
+                        path: crate::util::rel_str(&project.root, &matched),
                         size: meta.len(),
                         sha256: crate::util::hex(&digest),
                     });

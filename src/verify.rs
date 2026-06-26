@@ -127,11 +127,7 @@ impl<'a> Verify<'a> {
         opts: RunOptions,
     ) -> Result<Report, crate::Error> {
         let doc = parser::parse_file(path)?;
-        let spec_path_rel = path
-            .strip_prefix(&self.project.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned();
+        let spec_path_rel = crate::util::rel_str(&self.project.root, path);
 
         let judgment_prompts = self.judgment_prompts_for(&doc, &spec_path_rel);
 
@@ -247,11 +243,7 @@ impl<'a> Verify<'a> {
                 continue;
             }
             for f in matched {
-                let rel = f
-                    .strip_prefix(&self.project.root)
-                    .unwrap_or(&f)
-                    .to_string_lossy()
-                    .into_owned();
+                let rel = crate::util::rel_str(&self.project.root, &f);
                 let content = match fs::read_to_string(&f) {
                     Ok(c) => c,
                     Err(e) => {
@@ -306,12 +298,7 @@ impl<'a> Verify<'a> {
             .implements
             .iter()
             .flat_map(|g| crate::util::matched_files(self.project, g, false))
-            .map(|p| {
-                p.strip_prefix(&self.project.root)
-                    .unwrap_or(&p)
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .map(|p| crate::util::rel_str(&self.project.root, &p))
             .collect();
 
         for (idx, inv) in doc.judgment_invariants().enumerate() {
@@ -594,11 +581,7 @@ fn test_file_stamp_check(
     root: &std::path::Path,
     doc: &Document,
 ) -> Vec<Check> {
-    let rel = test_file
-        .strip_prefix(root)
-        .unwrap_or(test_file)
-        .to_string_lossy()
-        .into_owned();
+    let rel = crate::util::rel_str(root, test_file);
     let content = match fs::read_to_string(test_file) {
         Ok(c) => c,
         Err(e) => {

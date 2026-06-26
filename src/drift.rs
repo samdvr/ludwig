@@ -170,11 +170,7 @@ pub fn report_for_path(project: &Project, path: &Path) -> Result<DriftReport, Pr
 }
 
 fn file_status(project: &Project, path: &Path, doc: &Document, entry: Option<&SpecState>) -> FileDrift {
-    let rel = path
-        .strip_prefix(&project.root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned();
+    let rel = crate::util::rel_str(&project.root, path);
     if !path.is_file() {
         return FileDrift {
             path: rel,
@@ -304,11 +300,7 @@ pub fn record(project: &Project, doc: &Document, files: &[PathBuf]) -> Result<()
     let mut implementing_files: BTreeMap<String, String> = BTreeMap::new();
     for path in files {
         if let Some(sha) = body_sha(path) {
-            let rel = path
-                .strip_prefix(&project.root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned();
+            let rel = crate::util::rel_str(&project.root, path);
             implementing_files.insert(rel, sha);
         }
     }
