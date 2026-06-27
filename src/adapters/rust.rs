@@ -34,21 +34,47 @@ impl Adapter for RustAdapter {
         fs::create_dir_all(self.tests_dir())
             .map_err(|e| VerifyError::new(format!("mkdir tests: {e}")))?;
         let target = self.test_file_for(doc.id());
-        if !target.is_file() {
-            fs::write(&target, render_scaffold(doc))
-                .map_err(|e| VerifyError::new(format!("write {}: {e}", target.display())))?;
-        } else {
-            // Body is user-owned, but the trailing `ludwig-spec:` stamp must track
-            // the current spec hash so drift detection stays meaningful. Update in
-            // place when present; if the user has stripped the stamp entirely we
-            // leave the file alone — the structural check will surface that as a
-            // missing-stamp failure.
-            let content = fs::read_to_string(&target)
-                .map_err(|e| VerifyError::new(format!("read {}: {e}", target.display())))?;
-            let updated = crate::drift::update_stamp_in_place(&content, doc);
-            if updated != content {
-                fs::write(&target, &updated)
-                    .map_err(|e| VerifyError::new(format!("write {}: {e}", target.display())))?;
+        // Create the scaffold with `create_new` (via `write_guarded`) so a file
+        // that appears between a would-be `is_file()` check and the write can't be
+        // silently clobbered (TOCTOU). If the file already exists we fall through
+        // to the existing-file path below.
+        match crate::util::write_guarded(&target, render_scaffold(doc).as_bytes(), false) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Body is user-owned, but the trailing `ludwig-spec:` stamp must track
+                // the current spec hash so drift detection stays meaningful. Update in
+                // place when present; if the user has stripped the stamp entirely we
+                // leave the file alone — the structural check will surface that as a
+                // missing-stamp failure.
+                let content = fs::read_to_string(&target)
+                    .map_err(|e| VerifyError::new(format!("read {}: {e}", target.display())))?;
+                // Guard against slug collisions: two distinct spec ids can map to the
+                // same `file_slug` (e.g. `auth-login` and `auth/login` both become
+                // `auth_login`, so both want `tests/ludwig_auth_login.rs`). If this
+                // file already carries a stamp for a *different* spec, refuse to touch
+                // it — otherwise `update_stamp_in_place` would silently rewrite that
+                // spec's stamp to ours and `run` would verify the wrong tests. Surface
+                // it so the author renames one id.
+                if let Some(stamp) = crate::drift::parse_trailing(&content)
+                    && stamp.id != doc.id()
+                {
+                    return Err(VerifyError::new(format!(
+                        "generated test file {} already belongs to spec {:?}, but spec {:?} maps to the \
+                         same file (their ids differ only by `-` vs `/`); rename one id so they don't collide",
+                        crate::util::rel_str(&self.project.root, &target),
+                        stamp.id,
+                        doc.id(),
+                    ))
+                    .into());
+                }
+                let updated = crate::drift::update_stamp_in_place(&content, doc);
+                if updated != content {
+                    crate::util::write_guarded(&target, updated.as_bytes(), true)
+                        .map_err(|e| VerifyError::new(format!("write {}: {e}", target.display())))?;
+                }
+            }
+            Err(e) => {
+                return Err(VerifyError::new(format!("write {}: {e}", target.display())).into());
             }
         }
         // Return both paths; for the Rust adapter the "spec file" and "steps file" are

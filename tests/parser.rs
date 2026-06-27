@@ -497,7 +497,107 @@ fn golden_canonical_hash_is_pinned() {
     let doc = ludwig::parser::parse(GOLDEN_SPEC).expect("golden spec parses");
     assert_eq!(
         doc.canonical_hash(),
-        "91358482e1abffa17ab113cfbe84fd1a7e1c72f6f97abefa7f88ca15d5369243"
+        "2a68d24689e6756c9ae800e16cd059f78d30acf4ee5f94b36ab604f6a210eab6"
+    );
+}
+
+/// The canonical hash is built from the parsed model, not the raw markdown, so
+/// edits the parser normalizes away — wrapping a bullet across lines vs. one
+/// line, blank lines between bullets — must NOT change the hash. Two specs that
+/// parse to equal `Document`s must hash equal (no spurious drift).
+#[test]
+fn canonical_hash_ignores_bullet_reflow_and_blank_lines() {
+    let base = "---\n\
+id: reflow\ntitle: Reflow\nstatus: draft\nversion: 1\n---\n\n\
+## Intent\nThis spec checks that reflowing a wrapped bullet onto a single line, and \
+inserting blank lines between bullets, never changes the canonical hash of the spec.\n\n\
+## Behavior\n- {#b1} the quick brown fox\n  jumps over the lazy dog\n- {#b2} second behavior\n\n\
+## Examples\n```example name=\"ok\"\nGiven a thing\nWhen it runs\nThen it works\n```\n\n\
+## Invariants\n- {deterministic} it stays deterministic.\n";
+
+    let reflowed = "---\n\
+id: reflow\ntitle: Reflow\nstatus: draft\nversion: 1\n---\n\n\
+## Intent\nThis spec checks that reflowing a wrapped bullet onto a single line, and \
+inserting blank lines between bullets, never changes the canonical hash of the spec.\n\n\
+## Behavior\n\n- {#b1} the quick brown fox jumps over the lazy dog\n\n- {#b2} second behavior\n\n\
+## Examples\n```example name=\"ok\"\nGiven a thing\nWhen it runs\nThen it works\n```\n\n\
+## Invariants\n- {deterministic} it stays deterministic.\n";
+
+    let a = ludwig::parser::parse(base).unwrap();
+    let b = ludwig::parser::parse(reflowed).unwrap();
+    assert_eq!(a, b, "cosmetic-only edits should parse to equal documents");
+    assert_eq!(
+        a.canonical_hash(),
+        b.canonical_hash(),
+        "equal documents must hash equal"
+    );
+}
+
+/// Duplicate frontmatter keys are an authoring error and must be rejected rather
+/// than silently last-wins. (serde_yaml_ng enforces this; this pins the contract.)
+#[test]
+fn rejects_duplicate_frontmatter_key() {
+    let spec = "---\n\
+id: dup\nid: dup-two\ntitle: Dup\nstatus: draft\nversion: 1\n---\n\n\
+## Intent\nA spec with two id keys in its frontmatter, used to confirm the parser \
+rejects duplicate keys instead of silently keeping only one of the two values.\n\n\
+## Behavior\n- {#b1} it exists.\n\n\
+## Examples\n```example name=\"ok\"\nGiven a thing\nWhen it runs\nThen it works\n```\n\n\
+## Invariants\n- {deterministic} it stays deterministic.\n";
+    let err = ludwig::parser::parse(spec).unwrap_err();
+    assert!(err.message.contains("duplicate"), "got: {}", err.message);
+}
+
+/// Slug shape: single characters are valid; empty path segments and
+/// leading/trailing dashes per segment are not.
+#[test]
+fn slug_validation_edge_cases() {
+    use ludwig::util::is_valid_slug;
+    for ok in ["a", "1", "a-b", "auth/login", "token-bucket-rate-limiter", "a/b/c"] {
+        assert!(is_valid_slug(ok), "{ok:?} should be valid");
+    }
+    for bad in ["", "a//b", "-a", "a-", "/a", "a/", "a/-b", "A", "a_b", "a..b"] {
+        assert!(!is_valid_slug(bad), "{bad:?} should be invalid");
+    }
+}
+
+/// A `#`-run with no following space (`##foo`) is a malformed heading — most
+/// often a section header typed without the required space — and must error
+/// rather than be silently swallowed as section prose.
+#[test]
+fn rejects_heading_without_space() {
+    let spec = "---\n\
+id: bad-heading\ntitle: Bad heading\nstatus: draft\nversion: 1\n---\n\n\
+## Intent\nThis spec contains a malformed second-level heading typed without the \
+required space after the hashes, which must be reported instead of swallowed.\n\n\
+##Behavior\n- {#b1} it exists.\n\n\
+## Examples\n```example name=\"ok\"\nGiven a thing\nWhen it runs\nThen it works\n```\n\n\
+## Invariants\n- {deterministic} it stays deterministic.\n";
+    let err = ludwig::parser::parse(spec).unwrap_err();
+    assert!(
+        err.message.contains("malformed heading"),
+        "got: {}",
+        err.message
+    );
+}
+
+/// The Intent word-count gate is script-aware: a CJK Intent with no spaces is
+/// counted by character, so it isn't rejected as a one-word stub.
+#[test]
+fn cjk_intent_meets_word_count() {
+    // 24 CJK characters, no spaces — well over the 20-"word" minimum.
+    let intent = "这是一个用于测试中日韩文意图字数统计是否正确的规格说明文档示例内容";
+    assert!(intent.chars().count() >= 20);
+    let spec = format!(
+        "---\nid: cjk-intent\ntitle: CJK\nstatus: draft\nversion: 1\n---\n\n\
+## Intent\n{intent}\n\n\
+## Behavior\n- {{#b1}} it exists.\n\n\
+## Examples\n```example name=\"ok\"\nGiven a thing\nWhen it runs\nThen it works\n```\n\n\
+## Invariants\n- {{deterministic}} it stays deterministic.\n"
+    );
+    assert!(
+        ludwig::parser::parse(&spec).is_ok(),
+        "CJK intent should satisfy the word-count gate"
     );
 }
 

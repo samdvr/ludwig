@@ -42,20 +42,14 @@ pub fn parse_with_source(input: &str, source: Option<&Path>) -> Result<Document,
     let sections = tokenize_sections(&body, source)?;
     validate_section_order(&sections, source)?;
 
-    let intent_text = sections.get("Intent").expect("required section").to_owned();
+    // `validate_section_order` has already guaranteed every required section is
+    // present; `require_section` turns the "can't happen" absence into a regular
+    // parse error rather than a panic on user input.
+    let intent_text = require_section(&sections, "Intent", source)?.to_owned();
     let intent = parse_intent(&intent_text, source)?;
-    let behaviors = parse_behaviors(
-        sections.get("Behavior").expect("required section"),
-        source,
-    )?;
-    let examples = parse_examples(
-        sections.get("Examples").expect("required section"),
-        source,
-    )?;
-    let invariants = parse_invariants(
-        sections.get("Invariants").expect("required section"),
-        source,
-    )?;
+    let behaviors = parse_behaviors(require_section(&sections, "Behavior", source)?, source)?;
+    let examples = parse_examples(require_section(&sections, "Examples", source)?, source)?;
+    let invariants = parse_invariants(require_section(&sections, "Invariants", source)?, source)?;
 
     let non_goals = sections.get("Non-goals").map(|s| s.trim().to_string()).unwrap_or_default();
     let open_questions_text = sections
@@ -71,7 +65,16 @@ pub fn parse_with_source(input: &str, source: Option<&Path>) -> Result<Document,
     validate_unique_behavior_tags(&behaviors, source)?;
     enforce_active_status_rules(&frontmatter, &open_questions, source)?;
 
-    let canonical_body = build_canonical_body(&frontmatter, &sections);
+    let canonical_body = build_canonical_body(
+        &frontmatter,
+        &intent,
+        &behaviors,
+        &examples,
+        &invariants,
+        &non_goals,
+        &open_questions,
+        &implementation_notes,
+    );
 
     Ok(Document {
         frontmatter,
@@ -122,6 +125,19 @@ fn split_frontmatter(
     Ok((front, body))
 }
 
+/// Fetch a section that an earlier `validate_section_order` has already proven
+/// present. Returns an internal parse error instead of panicking if that
+/// invariant is ever violated, so no code path can `expect`-panic on user input.
+fn require_section<'a>(
+    sections: &'a IndexMap<String, String>,
+    name: &str,
+    source: Option<&Path>,
+) -> Result<&'a String, ParseError> {
+    sections.get(name).ok_or_else(|| {
+        ParseError::at(source, format!("internal: required section {name:?} missing after validation"))
+    })
+}
+
 /// Tokenize the body into named sections, tracking code-fence depth so that an H2
 /// inside a fenced example block does not split a section.
 fn tokenize_sections(
@@ -160,6 +176,21 @@ fn tokenize_sections(
                 return Err(ParseError::at(
                     source,
                     "H1 headings are not allowed inside a spec body; use Intent prose",
+                ));
+            }
+            // A `#`-run with no following space — `##foo`, `#foo`, `###bar` — is a
+            // malformed ATX heading (most often a section header typed without the
+            // required space). Reject it loudly rather than silently swallowing it
+            // as section prose. A `#`-run followed by a space (e.g. `### Notes`) is
+            // a legitimate sub-heading inside a section and is kept as content.
+            let hashes = line.chars().take_while(|c| *c == '#').count();
+            let after = &line[hashes..];
+            if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+                return Err(ParseError::at(
+                    source,
+                    format!(
+                        "malformed heading {line:?}: ATX headings need a space after the `#` markers (did you mean `## {after}`?)"
+                    ),
                 ));
             }
             if current_name.is_some() {
@@ -227,7 +258,7 @@ fn validate_section_order(
 
 fn parse_intent(text: &str, source: Option<&Path>) -> Result<String, ParseError> {
     let prose = text.trim().to_string();
-    let word_count = prose.split_whitespace().count();
+    let word_count = count_words(&prose);
     if word_count < INTENT_MIN_WORDS {
         return Err(ParseError::at(
             source,
@@ -245,6 +276,35 @@ fn parse_intent(text: &str, source: Option<&Path>) -> Result<String, ParseError>
         ));
     }
     Ok(prose)
+}
+
+/// Count "words" in a way that works for both space-separated scripts and
+/// scripts that don't use spaces (CJK). Each whitespace-delimited token counts
+/// as one word, except that every CJK character within it counts individually —
+/// so a 30-character Chinese Intent isn't seen as a single word and rejected as
+/// a stub. A token with no CJK characters counts as exactly one word.
+fn count_words(s: &str) -> usize {
+    let mut count = 0;
+    for token in s.split_whitespace() {
+        let cjk = token.chars().filter(|c| is_cjk(*c)).count();
+        // CJK chars each count as a word; any remaining non-CJK content in the
+        // token counts as one more word.
+        count += cjk + usize::from(token.chars().any(|c| !is_cjk(c)));
+    }
+    count
+}
+
+/// Whether `c` belongs to a CJK / Japanese / Korean script block that is written
+/// without spaces between words.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF      // Hiragana + Katakana
+        | 0x3400..=0x4DBF    // CJK Unified Ext A
+        | 0x4E00..=0x9FFF    // CJK Unified
+        | 0xAC00..=0xD7AF    // Hangul syllables
+        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+        | 0x20000..=0x2EBEF  // CJK Unified Ext B–F
+    )
 }
 
 fn parse_behaviors(text: &str, source: Option<&Path>) -> Result<Vec<Behavior>, ParseError> {
@@ -548,34 +608,105 @@ fn enforce_active_status_rules(
     ))
 }
 
-/// Canonical body for hashing: sorted frontmatter (hash omitted) + sections in canonical
-/// order, each line right-trimmed and the section body itself trimmed. Trailing newline.
+/// Canonical body for hashing, built from the *parsed* document rather than the
+/// raw markdown. Hashing the parsed model (not the source text) means the hash
+/// tracks meaning: reflowing a multi-line bullet onto one line, collapsing blank
+/// lines between bullets, or any other cosmetic edit the parser already
+/// normalizes away no longer registers as drift — and, because the body is a
+/// pure function of every semantic field, two documents that compare equal
+/// always hash equal. Prose sections are right-trimmed per line so trailing
+/// whitespace / CRLF churn is ignored (matching the parser's own normalization);
+/// optional sections are emitted only when non-empty. Section order is fixed.
+#[allow(clippy::too_many_arguments)]
 fn build_canonical_body(
     fm: &Frontmatter,
-    sections: &IndexMap<String, String>,
+    intent: &str,
+    behaviors: &[Behavior],
+    examples: &[Example],
+    invariants: &[Invariant],
+    non_goals: &str,
+    open_questions: &[String],
+    implementation_notes: &str,
 ) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    parts.push("---".to_string());
-    parts.push(fm.to_canonical_yaml().trim_end_matches('\n').to_string());
-    parts.push("---".to_string());
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(fm.to_canonical_yaml().trim_end_matches('\n'));
+    out.push_str("\n---\n");
 
-    for name in section_order() {
-        if let Some(body) = sections.get(name) {
-            parts.push(String::new());
-            parts.push(format!("## {name}"));
-            let normalized: String = body
-                .split('\n')
-                .map(|line| line.trim_end().to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let trimmed = normalized.trim().to_string();
-            if !trimmed.is_empty() {
-                parts.push(trimmed);
-            }
+    out.push_str("\n## Intent\n");
+    out.push_str(&normalize_prose(intent));
+    out.push('\n');
+
+    out.push_str("\n## Behavior\n");
+    for b in behaviors {
+        match &b.tag {
+            Some(tag) => out.push_str(&format!("- {{#{tag}}} {}\n", b.text)),
+            None => out.push_str(&format!("- {}\n", b.text)),
         }
     }
 
-    let mut out = parts.join("\n");
-    out.push('\n');
+    out.push_str("\n## Examples\n");
+    for ex in examples {
+        out.push_str(&format!("### {}\n", ex.name));
+        for s in &ex.steps {
+            out.push_str(&format!("- {} {}\n", gherkin_label(s.keyword), s.text));
+        }
+    }
+
+    out.push_str("\n## Invariants\n");
+    for inv in invariants {
+        out.push_str(&format!(
+            "- {{{}}} {}\n",
+            classifier_label(inv.classifier),
+            inv.text
+        ));
+    }
+
+    let non_goals = normalize_prose(non_goals);
+    if !non_goals.is_empty() {
+        out.push_str("\n## Non-goals\n");
+        out.push_str(&non_goals);
+        out.push('\n');
+    }
+    if !open_questions.is_empty() {
+        out.push_str("\n## Open questions\n");
+        for q in open_questions {
+            out.push_str(&format!("- {}\n", q.trim()));
+        }
+    }
+    let implementation_notes = normalize_prose(implementation_notes);
+    if !implementation_notes.is_empty() {
+        out.push_str("\n## Implementation notes\n");
+        out.push_str(&implementation_notes);
+        out.push('\n');
+    }
     out
+}
+
+/// Right-trim each line and trim the ends so trailing-whitespace / CRLF churn in
+/// free-prose sections never changes the hash.
+fn normalize_prose(s: &str) -> String {
+    s.split('\n')
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn gherkin_label(k: GherkinKeyword) -> &'static str {
+    match k {
+        GherkinKeyword::Given => "Given",
+        GherkinKeyword::When => "When",
+        GherkinKeyword::Then => "Then",
+        GherkinKeyword::And => "And",
+    }
+}
+
+fn classifier_label(c: Classifier) -> &'static str {
+    match c {
+        Classifier::Deterministic => "deterministic",
+        Classifier::Property => "property",
+        Classifier::Judgment => "judgment",
+    }
 }

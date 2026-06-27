@@ -157,34 +157,24 @@ impl Frontmatter {
         Ok(Self { id, title, status, owners, implements, depends_on, version, hash })
     }
 
-    /// Canonical YAML form for hashing: sorted keys, `hash` field omitted.
+    /// Canonical form for hashing: a fixed set of fields in a fixed order, with
+    /// the `hash` field omitted (it is derived from this very output). Emitted by
+    /// hand rather than via `serde_yaml` so the hashed form is fully owned here
+    /// and cannot shift under us when the YAML library changes its formatting — a
+    /// dependency bump that re-quotes scalars or re-wraps sequences would
+    /// otherwise silently invalidate every stored spec hash. The result is used
+    /// only for hashing and version-diffing, never parsed back, so scalars are
+    /// written verbatim and an empty list renders as `[]`.
     pub fn to_canonical_yaml(&self) -> String {
-        // Build a BTreeMap so keys serialize in sorted order. Use a single YAML mapping.
-        let mut m: BTreeMap<&str, YamlValue> = BTreeMap::new();
-        m.insert("id", YamlValue::String(self.id.clone()));
-        m.insert("title", YamlValue::String(self.title.clone()));
-        m.insert("status", YamlValue::String(self.status.as_str().to_string()));
-        m.insert(
-            "owners",
-            YamlValue::Sequence(
-                self.owners.iter().map(|s| YamlValue::String(s.clone())).collect(),
-            ),
-        );
-        m.insert(
-            "implements",
-            YamlValue::Sequence(
-                self.implements.iter().map(|s| YamlValue::String(s.clone())).collect(),
-            ),
-        );
-        m.insert(
-            "depends_on",
-            YamlValue::Sequence(
-                self.depends_on.iter().map(|s| YamlValue::String(s.clone())).collect(),
-            ),
-        );
-        m.insert("version", YamlValue::Number(self.version.into()));
-
-        serde_yaml::to_string(&m).unwrap_or_default()
+        let mut out = String::new();
+        out.push_str(&format!("id: {}\n", self.id));
+        out.push_str(&format!("title: {}\n", self.title));
+        out.push_str(&format!("status: {}\n", self.status.as_str()));
+        out.push_str(&format!("version: {}\n", self.version));
+        out.push_str(&format!("owners: [{}]\n", self.owners.join(", ")));
+        out.push_str(&format!("implements: [{}]\n", self.implements.join(", ")));
+        out.push_str(&format!("depends_on: [{}]\n", self.depends_on.join(", ")));
+        out
     }
 }
 

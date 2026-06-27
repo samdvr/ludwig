@@ -120,6 +120,26 @@ fn catalog_renders_grouped_by_game() {
 }
 
 #[test]
+fn catalog_escapes_backtick_in_title() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let p = ludwig::project::Project::open(dir.path()).unwrap();
+    let spec = "---\n\
+id: ticky\ntitle: \"A `backtick` title\"\nstatus: draft\nversion: 1\n---\n\n\
+## Intent\nA spec whose title contains backticks, used to confirm the catalog \
+renderer escapes them so they cannot open an inline-code span inside the table.\n\n\
+## Behavior\n- {#b1} it exists.\n\n\
+## Examples\n```example name=\"ok\"\nGiven a thing\nWhen it runs\nThen it works\n```\n\n\
+## Invariants\n- {deterministic} it stays deterministic.\n";
+    std::fs::write(p.specs_dir().join("ticky.spec.md"), spec).unwrap();
+    let output = ludwig::catalog::render(&p);
+    assert!(
+        output.contains("A \\`backtick\\` title"),
+        "title backticks must be escaped, got:\n{output}"
+    );
+}
+
+#[test]
 fn glossary_inherits_from_parent_directory() {
     let dir = TempDir::new("ludwig-test");
     ludwig::scaffold::init(dir.path()).unwrap();

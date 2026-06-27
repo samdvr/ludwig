@@ -284,7 +284,7 @@ pub fn move_spec(
 ) -> Result<PathBuf, ProjectError> {
     validate_slug(slug)?;
     let source = project
-        .find_spec_path(slug)
+        .find_spec_by_id(slug)
         .ok_or_else(|| ProjectError::new(format!("no spec found with id {slug:?}")))?;
 
     let content = fs::read_to_string(&source)
@@ -316,6 +316,9 @@ pub fn move_spec(
     if source == target {
         return Ok(target);
     }
+    // Whether the destination already exists tells us if a failed source-removal
+    // below can be safely rolled back (we only created it fresh if it didn't).
+    let target_preexisted = target.is_file();
     match crate::util::write_guarded(&target, content.as_bytes(), force) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -329,8 +332,26 @@ pub fn move_spec(
             return Err(ProjectError::new(format!("write {}: {e}", target.display())));
         }
     }
-    fs::remove_file(&source)
-        .map_err(|e| ProjectError::new(format!("remove {}: {e}", source.display())))?;
+    if let Err(e) = fs::remove_file(&source) {
+        // The spec now exists at both paths. If we wrote the destination fresh,
+        // roll it back so the project is never left with a duplicate id; if we
+        // overwrote a pre-existing file under `force` we can't safely restore it,
+        // so leave both and report clearly.
+        if !target_preexisted {
+            let _ = fs::remove_file(&target);
+            return Err(ProjectError::new(format!(
+                "could not remove the original {} after writing the move; rolled it back, \
+                 spec left in place: {e}",
+                source.display()
+            )));
+        }
+        return Err(ProjectError::new(format!(
+            "move wrote {} but could not remove the original {}: {e}; the project now \
+             contains a duplicate id — remove one copy by hand",
+            crate::util::rel_str(&project.root, &target),
+            source.display()
+        )));
+    }
 
     // Clean up the source game directory if it's now empty (and isn't the
     // specs root itself). Leaves a tidy specs/ tree without surprising the

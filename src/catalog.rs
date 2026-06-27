@@ -64,13 +64,15 @@ pub fn render(project: &Project) -> String {
 }
 
 /// Escape characters that would break a Markdown table row: `|` and `\` need
-/// backslash-escaping, newlines must collapse to a single space.
+/// backslash-escaping, a backtick would otherwise open/close an inline-code span
+/// (titles are free-form), and newlines must collapse to a single space.
 fn escape_md_cell(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '|' => out.push_str("\\|"),
+            '`' => out.push_str("\\`"),
             '\n' | '\r' => out.push(' '),
             other => out.push(other),
         }

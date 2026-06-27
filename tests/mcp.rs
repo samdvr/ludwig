@@ -261,6 +261,31 @@ fn spec_propose_returns_prompt() {
 }
 
 #[test]
+fn spec_propose_rejects_escaping_game() {
+    let (_dir, project) = make_project_with_minimal_spec();
+    let server = ludwig::mcp::Server::new(Some(project), None);
+    // `game` flows into `specs_dir().join(game)`; a traversal must be rejected as
+    // invalid params rather than silently enumerating files outside the specs dir.
+    let resp = call(
+        &server,
+        "tools/call",
+        json!({
+            "name": "spec.propose",
+            "arguments": {
+                "slug": "url-shortener",
+                "description": "Map long URLs to short tokens.",
+                "game": "../../etc"
+            }
+        }),
+    );
+    let msg = resp
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("expected a JSON-RPC error, got: {resp}"));
+    assert!(msg.contains("kebab-case"), "got: {msg}");
+}
+
+#[test]
 fn project_decompose_returns_prompt() {
     let (_dir, project) = make_project_with_minimal_spec();
     let server = ludwig::mcp::Server::new(Some(project), None);
@@ -762,6 +787,12 @@ fn tool_execution_failure_surfaces_as_is_error_result() {
         "must not be a JSON-RPC error"
     );
     assert_eq!(resp.pointer("/result/isError"), Some(&Value::Bool(true)));
+    // The originating JSON-RPC code (-32001 "no project") is preserved on the
+    // result so a client that branches on it still can.
+    assert_eq!(
+        resp.pointer("/result/code").and_then(Value::as_i64),
+        Some(-32001)
+    );
 }
 
 #[test]

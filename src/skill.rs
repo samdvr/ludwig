@@ -9,7 +9,7 @@ struct SkillManifest {
     commands: Vec<SlashCommand>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SlashCommand {
     name: &'static str,
     description: &'static str,
@@ -126,16 +126,4 @@ pub fn manifest_yaml() -> String {
         commands: COMMANDS.to_vec(),
     };
     serde_yaml::to_string(&manifest).unwrap_or_default()
-}
-
-impl Clone for SlashCommand {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name,
-            description: self.description,
-            args: self.args,
-            run: self.run,
-            after: self.after,
-        }
-    }
 }

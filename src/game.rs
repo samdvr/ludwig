@@ -124,18 +124,30 @@ fn split_frontmatter(
     } else {
         String::new()
     };
+    // A present-but-malformed frontmatter block is an authoring error, not an
+    // empty game: surface it rather than silently coercing to an empty mapping
+    // (which would produce a directory-named game with no glossary and no hint
+    // that the manifest is broken). An empty block (`---\n---`) parses to Null
+    // and is legitimately treated as "no frontmatter fields".
     let parsed: serde_yaml::Value = serde_yaml::from_str(&front_yaml)
-        .unwrap_or(serde_yaml::Value::Null);
-    let map = if let serde_yaml::Value::Mapping(m) = parsed {
-        let mut out = BTreeMap::new();
-        for (k, v) in m {
-            if let serde_yaml::Value::String(s) = k {
-                out.insert(s, v);
+        .map_err(|e| ParseError::at(Some(source), format!("_game.md frontmatter invalid: {e}")))?;
+    let map = match parsed {
+        serde_yaml::Value::Mapping(m) => {
+            let mut out = BTreeMap::new();
+            for (k, v) in m {
+                if let serde_yaml::Value::String(s) = k {
+                    out.insert(s, v);
+                }
             }
+            out
         }
-        out
-    } else {
-        BTreeMap::new()
+        serde_yaml::Value::Null => BTreeMap::new(),
+        _ => {
+            return Err(ParseError::at(
+                Some(source),
+                "_game.md frontmatter must be a mapping",
+            ));
+        }
     };
     Ok((map, body))
 }

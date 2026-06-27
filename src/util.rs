@@ -8,12 +8,15 @@ use regex::Regex;
 use crate::plan;
 use crate::project::Project;
 
-/// A kebab-case slug: lowercase letters/digits separated by dashes, with `/`
-/// permitted so sub-game ids (`auth/login`) round-trip. The single source of
-/// truth shared by `scaffold::validate_slug` (which validates user-supplied
-/// slugs) and the parser (which now validates a spec's frontmatter `id`).
-static SLUG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9\-/]*[a-z0-9]$").unwrap());
+/// A kebab-case slug: one or more `/`-separated segments, each a run of
+/// lowercase letters/digits with internal dashes (no leading/trailing dash, no
+/// empty segment). `/` lets sub-game ids (`auth/login`) round-trip. A single
+/// character (`a`, `1`) is valid; `a//b`, `-a`, `a/`, and `a/-b` are not. The
+/// single source of truth shared by `scaffold::validate_slug` (user-supplied
+/// slugs) and the parser (a spec's frontmatter `id`).
+static SLUG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(/[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$").unwrap()
+});
 
 /// Return `true` if `s` is a well-formed kebab-case slug. A spec's `id` flows
 /// into filesystem paths (the generated `tests/ludwig_<id>.rs`, the cache file
@@ -39,6 +42,24 @@ pub fn pattern_escapes_root(pat: &str) -> bool {
     })
 }
 
+/// Return `true` if `path` resolves outside `root` once symlinks are followed.
+/// [`pattern_escapes_root`] only inspects a pattern's textual components; this is
+/// the complementary *runtime* check for a concrete, existing path that may be
+/// (or may live under) a symlink pointing out of the project tree. Without it, a
+/// spec's `implements:` could name an in-tree path like `src/innocent.rs` that is
+/// actually a symlink to `/etc/passwd`, and the file read that follows would leak
+/// out-of-tree content. Both `root` and `path` are canonicalized so the
+/// comparison is link- and `..`-free. A path that cannot be canonicalized is
+/// treated as escaping; callers only invoke this for paths they have already
+/// confirmed exist, so this is a conservative default.
+pub fn resolved_path_escapes_root(root: &Path, path: &Path) -> bool {
+    let Ok(real_path) = path.canonicalize() else {
+        return true;
+    };
+    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    !real_path.starts_with(&real_root)
+}
+
 /// Render `path` as a project-root-relative string using forward slashes on
 /// every platform. Root-relative paths are part of the JSON contract surfaced
 /// over MCP (`spec.list`/`read`/`diff`/`plan`/`verify`, etc.) and persisted in
@@ -60,9 +81,11 @@ pub fn rel_str(root: &Path, path: &Path) -> String {
 /// digest (spec hash, file fingerprint, body sha). Keeps one definition so the
 /// digest format can't drift across modules.
 pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        // `write!` into the preallocated buffer — no per-byte String allocation.
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -87,10 +110,23 @@ pub fn matched_files(project: &Project, pattern: &str, include_missing: bool) ->
         return Vec::new();
     }
     if plan::contains_glob(pattern) {
-        plan::glob_expand(&project.root, pattern)
+        plan::glob_expand(project, pattern)
     } else {
         let p = project.root.join(pattern);
-        if p.is_file() || include_missing {
+        if p.is_file() {
+            // The path exists. Guard against an in-tree path that is itself a
+            // symlink (or sits under a symlinked directory) resolving outside the
+            // project: `is_file()` and the subsequent read both follow links,
+            // which would let a spec read out-of-tree content. `pattern_escapes_root`
+            // only inspects the textual pattern, so this is the orthogonal check.
+            if resolved_path_escapes_root(&project.root, &p) {
+                Vec::new()
+            } else {
+                vec![p]
+            }
+        } else if include_missing {
+            // Genuinely absent: hand the projected path back so drift can report
+            // it as `Missing`. Nothing is read, so there is no escape to guard.
             vec![p]
         } else {
             Vec::new()

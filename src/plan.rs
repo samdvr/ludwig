@@ -217,7 +217,8 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
         // can't fingerprint (and thereby leak the size/sha of) files outside the
         // project tree. The glob branch already walks only under `root`, but the
         // exact-path branch would otherwise read whatever `root.join(pat)`
-        // resolves to.
+        // resolves to — including through a symlink, which `resolved_path_escapes_root`
+        // below catches at read time.
         if crate::util::pattern_escapes_root(pat) {
             continue;
         }
@@ -230,6 +231,7 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
         if !contains_glob(&pat_str) {
             if let Ok(meta) = std::fs::metadata(&full)
                 && meta.is_file()
+                && !crate::util::resolved_path_escapes_root(&project.root, &full)
                 && let Ok(bytes) = fs::read(&full)
             {
                 let mut hasher = Sha256::new();
@@ -242,7 +244,7 @@ fn existing_implementing_files(project: &Project, globs: &[String]) -> Vec<FileF
                 });
             }
         } else {
-            for matched in glob_expand(&project.root, pat) {
+            for matched in glob_expand(project, pat) {
                 if let Ok(meta) = std::fs::metadata(&matched)
                     && meta.is_file()
                     && let Ok(bytes) = fs::read(&matched)
@@ -280,15 +282,23 @@ pub(crate) fn contains_glob(pat: &str) -> bool {
 }
 
 /// Directories `glob_expand` never descends into: build output, VCS internals,
-/// and Ludwig's own state dir. Matching by leaf name keeps it simple and covers
+/// dependency/virtualenv trees, and Ludwig's own state dir (including a
+/// non-default configured one). Matching by leaf name keeps it simple and covers
 /// the common cases; a spec's `implements:` is never expected to point inside one.
-fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
+fn is_pruned_dir(entry: &walkdir::DirEntry, state_dir_leaf: Option<&str>) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
+    let Some(name) = entry.file_name().to_str() else {
+        return false;
+    };
+    if state_dir_leaf == Some(name) {
+        return true;
+    }
     matches!(
-        entry.file_name().to_str(),
-        Some(".git" | "target" | ".ludwig" | "node_modules")
+        name,
+        ".git" | ".hg" | ".svn" | "target" | ".ludwig" | "node_modules"
+            | ".venv" | "venv" | "dist" | "vendor"
     )
 }
 
@@ -298,7 +308,13 @@ fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
 /// or more intervening segments, so `src/**/*.rs` also matches `src/foo.rs`.
 /// Bracket character classes are NOT supported — `[` and `]` are escaped so
 /// they are matched literally.
-pub(crate) fn glob_expand(root: &std::path::Path, pattern: &str) -> Vec<PathBuf> {
+pub(crate) fn glob_expand(project: &Project, pattern: &str) -> Vec<PathBuf> {
+    let root = &project.root;
+    // Prune the project's configured state dir by its leaf name (the default
+    // `.ludwig` is also in the static list, but a custom `state_dir` would not be).
+    let state_dir_leaf = std::path::Path::new(&project.config.state_dir)
+        .file_name()
+        .and_then(|n| n.to_str());
     let regex_str = glob_to_regex(pattern);
     let re = match regex::Regex::new(&regex_str) {
         Ok(r) => r,
@@ -311,7 +327,7 @@ pub(crate) fn glob_expand(root: &std::path::Path, pattern: &str) -> Vec<PathBuf>
         // (and fingerprint) generated artifacts, git internals, or Ludwig's own
         // bookkeeping — none of which a spec's `implements:` should match. This
         // also keeps the walk cheap on large trees.
-        .filter_entry(|e| !is_pruned_dir(e))
+        .filter_entry(|e| !is_pruned_dir(e, state_dir_leaf))
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {

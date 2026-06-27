@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -57,6 +57,35 @@ pub const TOOL_NAMES: &[&str] = &[
 /// read-only spec tools available to an untrusted client.
 const EXEC_TOOLS: &[&str] = &["spec.verify"];
 
+/// Per-line read cap for the stdio transport. A JSON-RPC message arrives as a
+/// single line; bounding it stops a newline-less line from an untrusted client
+/// from exhausting memory. 16 MiB sits far above any legitimate request (e.g. a
+/// large `spec.write` body) while staying finite.
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Consume and discard bytes up to and including the next newline (or EOF)
+/// without buffering them. Used to resynchronize the stream after an over-long
+/// line is rejected, so the next [`Server::run`] iteration starts at a fresh
+/// message boundary. Allocation-free: it works directly off the reader's buffer.
+fn drain_line<R: BufRead>(reader: &mut R) -> std::io::Result<()> {
+    loop {
+        let (done, used) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                return Ok(()); // EOF
+            }
+            match available.iter().position(|&b| b == b'\n') {
+                Some(i) => (true, i + 1),
+                None => (false, available.len()),
+            }
+        };
+        reader.consume(used);
+        if done {
+            return Ok(());
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorObject {
     pub code: i32,
@@ -88,8 +117,39 @@ impl Server {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        for line in stdin.lock().lines() {
-            let line = line?;
+        let mut reader = stdin.lock();
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            buf.clear();
+            // Bound each line with `take` so a single newline-less line from an
+            // untrusted client can't drive unbounded allocation (memory-exhaustion
+            // DoS). A JSON-RPC message arrives as one line, so the cap is per
+            // message. `.lines()` would grow the buffer without limit.
+            let n = (&mut reader)
+                .take(MAX_LINE_BYTES as u64)
+                .read_until(b'\n', &mut buf)?;
+            if n == 0 {
+                break; // EOF
+            }
+            // Hit the cap without reaching a newline: the line is over-long.
+            // Reject it, drain its tail so the stream resynchronizes at the next
+            // message boundary, and keep serving.
+            if n == MAX_LINE_BYTES && buf.last() != Some(&b'\n') {
+                drain_line(&mut reader)?;
+                let resp = serialize_response(&ResponseValue {
+                    id: None,
+                    payload: Err(ErrorObject {
+                        code: -32600,
+                        message: format!(
+                            "invalid request: line exceeds {MAX_LINE_BYTES}-byte limit"
+                        ),
+                    }),
+                });
+                writeln!(out, "{resp}")?;
+                out.flush()?;
+                continue;
+            }
+            let line = String::from_utf8_lossy(&buf);
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -397,7 +457,11 @@ impl Server {
             Err(err) if err.code == -32602 => Err(err),
             Err(err) => Ok(json!({
                 "content": [{ "type": "text", "text": err.message }],
-                "isError": true
+                "isError": true,
+                // Preserve the originating JSON-RPC error code so a client that
+                // branches on it (e.g. -32001 "no project") still can — it would
+                // otherwise be lost when the error is folded into a text result.
+                "code": err.code
             })),
         }
     }
@@ -548,6 +612,17 @@ impl Server {
         let slug = require_string(args, "slug")?;
         let description = require_string(args, "description")?;
         let game_name = args.get("game").and_then(|v| v.as_str());
+        // `game` flows into `specs_dir().join(game)` to enumerate peer specs and
+        // read the game glossary, so it must be confined exactly as spec.write /
+        // spec.move / game.create confine it — an unvalidated value like
+        // "../../somedir" would escape the specs directory and leak the existence
+        // and glossary of files outside it.
+        if let Some(g) = game_name {
+            scaffold::validate_slug(g).map_err(|e| ErrorObject {
+                code: -32602,
+                message: e.0,
+            })?;
+        }
         let peers_owned = project.peer_specs_for(game_name);
         let peers: Vec<PeerSpec<'_>> = peers_owned
             .iter()

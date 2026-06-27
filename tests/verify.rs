@@ -56,6 +56,41 @@ fn render_does_not_overwrite_existing_user_edits() {
     assert_eq!(body, "// user-owned content\n");
 }
 
+/// Two distinct spec ids can map to the same generated test file (`auth-login`
+/// and `auth/login` both slugify to `tests/ludwig_auth_login.rs`). The second
+/// render must refuse loudly rather than silently rewrite the first spec's stamp
+/// and verify the wrong tests.
+#[test]
+fn render_refuses_slug_colliding_specs() {
+    let dir = TempDir::new("ludwig-test");
+    ludwig::scaffold::init(dir.path()).unwrap();
+    let project = ludwig::project::Project::open(dir.path()).unwrap();
+
+    let spec = |id: &str| {
+        format!(
+            "---\nid: {id}\ntitle: Auth\nstatus: draft\nversion: 1\n---\n\n\
+             ## Intent\nThis spec exists only to exercise the generated-test-file \
+             slug collision guard, so the prose here is padded out to satisfy the \
+             parser's minimum intent word-count requirement.\n\n\
+             ## Behavior\n- {{#b1}} it logs in.\n\n\
+             ## Examples\n```example name=\"ok\"\nGiven a user\nWhen they log in\nThen it works\n```\n\n\
+             ## Invariants\n- {{deterministic}} login is deterministic.\n"
+        )
+    };
+
+    let doc_a = ludwig::parser::parse(&spec("auth-login")).unwrap();
+    let doc_b = ludwig::parser::parse(&spec("auth/login")).unwrap();
+
+    let adapter = ludwig::adapters::for_project(&project);
+    use ludwig::adapters::Adapter;
+    adapter.render(&doc_a).unwrap();
+    let err = adapter.render(&doc_b).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("collide") && msg.contains("auth-login"),
+        "expected a collision error naming the owning spec, got: {msg}"
+    );
+}
 #[test]
 fn end_to_end_verify_against_real_cargo_project() {
     let dir = TempDir::new("ludwig-test");
